@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Arch Client - launcher Minecraft Fabric (ttkbootstrap, theme flatly)
-# Tự nhận diện OS + cài gói thiếu, tự tạo .minecraft, log lỗi ra file txt.
+# Tự nhận diện OS + cài gói thiếu, tự tạo .minecraft, tự cài shortcut
+# (.desktop Linux / Start Menu + Desktop Windows), log lỗi ra file txt.
 #
 # Cài thủ công nếu cần:
 #   pip install minecraft-launcher-lib requests ttkbootstrap --break-system-packages
@@ -37,8 +38,11 @@ REQUIRED_PIP_PACKAGES = {
 }
 
 OPTIONAL_PIP_PACKAGES = {
-    # tính năng phụ (Discord Rich Presence) — thiếu vẫn chạy launcher bình thường
+    # tính năng phụ — thiếu vẫn chạy launcher bình thường
     "pypresence": "pypresence",
+    # trình duyệt nhúng trong launcher (Modrinth / trang mod)
+    "tkinterweb": "tkinterweb",
+    "webview": "pywebview",
 }
 
 
@@ -192,25 +196,42 @@ def _run(cmd, use_sudo=False):
 
 
 def ensure_system_packages(osinfo):
-    """Cài gói hệ thống cần thiết (chủ yếu là Tk cho tkinter) nếu thiếu, theo từng distro."""
+    """Cài gói hệ thống cần thiết theo distro: Tk + WebKit (cho trình duyệt nhúng)."""
     if osinfo["system"] != "Linux":
+        # Windows: WebView2 thường có sẵn trên Win10/11 — pywebview dùng Edge WebView2.
         return
-    try:
-        import tkinter  # noqa: F401
-        return  # đã có sẵn, không cần làm gì
-    except ImportError:
-        pass
 
     pm = osinfo["pkg_manager"]
-    _bprint("⏳ Thiếu tkinter (Tk) trên hệ thống — đang tự động cài đặt...")
+    need_tk = False
+    try:
+        import tkinter  # noqa: F401
+    except ImportError:
+        need_tk = True
+
+    if need_tk:
+        _bprint("⏳ Thiếu tkinter (Tk) trên hệ thống — đang tự động cài đặt...")
+        if pm == "pacman":
+            _run(["pacman", "-Sy", "--needed", "--noconfirm", "tk"], use_sudo=True)
+        elif pm == "apt":
+            _run(["apt-get", "update"], use_sudo=True)
+            _run(["apt-get", "install", "-y", "python3-tk"], use_sudo=True)
+        else:
+            _bprint("⚠ Không nhận diện được trình quản lý gói (pacman/apt).")
+            _bprint("  Hãy tự cài thủ công: gói 'tk' (Arch) hoặc 'python3-tk' (Debian/Ubuntu).")
+
+    # WebKitGTK / GI — cần cho pywebview + một số backend trình duyệt nhúng trên Linux.
+    _bprint("⏳ Kiểm tra gói trình duyệt nhúng (WebKit)...")
     if pm == "pacman":
-        _run(["pacman", "-Sy", "--needed", "--noconfirm", "tk"], use_sudo=True)
+        _run(["pacman", "-Sy", "--needed", "--noconfirm",
+              "webkit2gtk-4.1", "python-gobject"], use_sudo=True) or             _run(["pacman", "-Sy", "--needed", "--noconfirm",
+                  "webkit2gtk", "python-gobject"], use_sudo=True)
     elif pm == "apt":
         _run(["apt-get", "update"], use_sudo=True)
-        _run(["apt-get", "install", "-y", "python3-tk"], use_sudo=True)
+        _run(["apt-get", "install", "-y",
+              "python3-gi", "python3-gi-cairo", "gir1.2-webkit2-4.1"], use_sudo=True) or             _run(["apt-get", "install", "-y",
+                  "python3-gi", "python3-gi-cairo", "gir1.2-webkit2-4.0"], use_sudo=True)
     else:
-        _bprint("⚠ Không nhận diện được trình quản lý gói (pacman/apt).")
-        _bprint("  Hãy tự cài thủ công: gói 'tk' (Arch) hoặc 'python3-tk' (Debian/Ubuntu).")
+        _bprint("ℹ Có thể cần cài WebKitGTK thủ công nếu trình duyệt nhúng không mở được.")
 
 
 def _pip_install(packages):
@@ -269,8 +290,8 @@ def ensure_python_packages():
             _bprint("✅ Đã cài xong thư viện phụ.")
             importlib.invalidate_caches()
         else:
-            _bprint("ℹ Không cài được thư viện phụ — Discord Rich Presence sẽ bị tắt, "
-                     "launcher vẫn chạy bình thường.")
+            _bprint("ℹ Không cài được một số thư viện phụ (Discord RPC / trình duyệt nhúng) — "
+                     "launcher vẫn chạy; tab Browser có thể bị hạn chế.")
 
 
 def bootstrap_environment():
@@ -332,7 +353,113 @@ try:
 except ImportError:
     DiscordPresence = None
 
+try:
+    from tkinterweb import HtmlFrame as TkHtmlFrame
+except ImportError:
+    TkHtmlFrame = None
+
+try:
+    import webview as pywebview
+except ImportError:
+    pywebview = None
+
 DISCORD_CLIENT_ID = "1545310964331843584"
+
+# Trang mặc định khi mở browser (HTTPS). URL có version được gắn lúc runtime.
+BROWSER_HOME = "https://modrinth.com/mods?l=fabric"
+BROWSER_QUICK = [
+    ("Modrinth", "https://modrinth.com/mods?l=fabric"),
+    ("CurseForge", "https://www.curseforge.com/minecraft/search?class=mc-mods"),
+    ("Planet MC", "https://www.planetminecraft.com/resources/mods/?order=order_popularity"),
+]
+
+# Danh sách domain tracker / ads / telemetry — chặn khi điều hướng & strip tham số.
+TRACKER_DOMAINS = {
+    "google-analytics.com", "googletagmanager.com", "googleadservices.com",
+    "doubleclick.net", "googlesyndication.com", "adservice.google.com",
+    "facebook.net", "facebook.com", "connect.facebook.net",
+    "scorecardresearch.com", "quantserve.com", "outbrain.com", "taboola.com",
+    "hotjar.com", "mouseflow.com", "fullstory.com", "mixpanel.com",
+    "segment.io", "segment.com", "amplitude.com", "sentry.io",
+    "newrelic.com", "nr-data.net", "clarity.ms", "bing.com",
+    "ads.twitter.com", "analytics.twitter.com", "t.co",
+    "adnxs.com", "advertising.com", "criteo.com", "pubmatic.com",
+    "moatads.com", "amazon-adsystem.com", "yandex.ru", "mc.yandex.ru",
+}
+TRACKING_QUERY_KEYS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "fbclid", "gclid", "dclid", "msclkid", "mc_eid", "yclid",
+    "_ga", "_gl", "ref", "referrer", "source",
+}
+
+
+def _host_of(url: str) -> str:
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(url).hostname or "").lower().lstrip(".")
+    except Exception:
+        return ""
+
+
+def is_tracker_url(url: str) -> bool:
+    host = _host_of(url)
+    if not host:
+        return False
+    for t in TRACKER_DOMAINS:
+        if host == t or host.endswith("." + t):
+            return True
+    return False
+
+
+def strip_tracking_params(url: str) -> str:
+    try:
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+        p = urlparse(url)
+        if not p.query:
+            return url
+        q = parse_qs(p.query, keep_blank_values=True)
+        cleaned = {k: v for k, v in q.items() if k.lower() not in TRACKING_QUERY_KEYS}
+        return urlunparse(p._replace(query=urlencode(cleaned, doseq=True)))
+    except Exception:
+        return url
+
+
+def sanitize_browse_url(url: str) -> str:
+    """Chỉ cho phép http(s); mặc định thêm https; chặn tracker; bỏ param theo dõi."""
+    u = (url or "").strip()
+    if not u:
+        return BROWSER_HOME
+    if not re.match(r"^https?://", u, re.I):
+        u = "https://" + u
+    if is_tracker_url(u):
+        return BROWSER_HOME
+    return strip_tracking_params(u)
+
+
+# JS chống tracker tối thiểu tiêm vào trang (chặn beacon / pixel phổ biến).
+ANTI_TRACKER_JS = r"""
+(function(){
+  try {
+    var blocked = /google-analytics|googletagmanager|doubleclick|facebook\.net|hotjar|scorecardresearch|clarity\.ms|segment\.|mixpanel|amplitude/i;
+    var obs = new MutationObserver(function(muts){
+      muts.forEach(function(m){
+        m.addedNodes && m.addedNodes.forEach(function(n){
+          if (!n || n.nodeType !== 1) return;
+          var tag = (n.tagName||'').toLowerCase();
+          var src = n.src || n.href || '';
+          if ((tag==='script'||tag==='img'||tag==='iframe') && blocked.test(src)) {
+            n.remove();
+          }
+        });
+      });
+    });
+    obs.observe(document.documentElement, {childList:true, subtree:true});
+    if (navigator.sendBeacon) {
+      navigator.sendBeacon = function(){ return false; };
+    }
+  } catch(e) {}
+})();
+"""
 
 APP_DIR = Path(__file__).resolve().parent
 ICON_PATH = APP_DIR / "img" / "icon.png"
@@ -340,32 +467,78 @@ BANNER_PATH = APP_DIR / "img" / "banner.png"
 WEBSITE_URL = "https://archclient.netlify.app"
 
 
-def _load_image(path, size=None):
+def _soft_round_mask(size, radius=10):
+    """Mask bo góc mềm cho icon — không tròn 100% kiểu avatar mạng xã hội."""
+    from PIL import ImageDraw
+    w, h = size
+    mask = Image.new("L", (w, h), 0)
+    draw = ImageDraw.Draw(mask)
+    r = max(2, min(radius, w // 4, h // 4))
+    draw.rounded_rectangle((0, 0, w - 1, h - 1), radius=r, fill=255)
+    return mask
+
+
+def _load_image(path, size=None, rounded=False, radius=10):
     if Image is None or not path.exists():
         return None
     try:
         img = Image.open(path).convert("RGBA")
         if size:
-            img = img.resize(size, Image.LANCZOS)
+            # Cover crop vuông rồi resize — icon không bị méo / letterbox xấu
+            tw, th = size
+            src_w, src_h = img.size
+            scale = max(tw / src_w, th / src_h)
+            nw, nh = max(1, int(src_w * scale)), max(1, int(src_h * scale))
+            img = img.resize((nw, nh), Image.LANCZOS)
+            left = (nw - tw) // 2
+            top = (nh - th) // 2
+            img = img.crop((left, top, left + tw, top + th))
+        if rounded and Image is not None:
+            try:
+                mask = _soft_round_mask(img.size, radius=radius)
+                out = Image.new("RGBA", img.size, (0, 0, 0, 0))
+                out.paste(img, (0, 0), mask=mask)
+                img = out
+            except Exception:
+                pass
         return ImageTk.PhotoImage(img)
     except Exception:
         return None
 
 
-def load_icon_image(size=None):
-    """Tải img/icon.png, trả về ImageTk.PhotoImage hoặc None nếu thiếu file/thư viện."""
-    return _load_image(ICON_PATH, size)
+def load_icon_image(size=None, rounded=True):
+    """Tải img/icon.png — bo góc nhẹ để không lộ góc vuông cứng."""
+    if size is None:
+        return _load_image(ICON_PATH, rounded=rounded, radius=12)
+    r = max(4, min(size) // 6)
+    return _load_image(ICON_PATH, size=size, rounded=rounded, radius=r)
 
 
-def load_banner_image(max_width=None):
-    """Tải img/banner.png, tự co giãn theo max_width (giữ tỉ lệ) nếu truyền vào."""
+def load_banner_image(max_width=None, max_height=120):
+    """Tải banner: giới hạn chiều cao để không chiếm nửa launcher, giữ tỉ lệ."""
     if Image is None or not BANNER_PATH.exists():
         return None
     try:
         img = Image.open(BANNER_PATH).convert("RGBA")
-        if max_width and img.width > max_width:
-            ratio = max_width / img.width
-            img = img.resize((max_width, int(img.height * ratio)), Image.LANCZOS)
+        w, h = img.size
+        scale = 1.0
+        if max_width and w > max_width:
+            scale = min(scale, max_width / w)
+        if max_height and h * scale > max_height:
+            scale = min(scale, max_height / h)
+        if scale < 1.0:
+            img = img.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
+        # Bo góc rất nhẹ cho banner
+        try:
+            from PIL import ImageDraw
+            mask = Image.new("L", img.size, 0)
+            draw = ImageDraw.Draw(mask)
+            draw.rounded_rectangle((0, 0, img.width - 1, img.height - 1), radius=8, fill=255)
+            out = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            out.paste(img, (0, 0), mask=mask)
+            img = out
+        except Exception:
+            pass
         return ImageTk.PhotoImage(img)
     except Exception:
         return None
@@ -382,6 +555,7 @@ LANG_STRINGS = {
         "tab_settings": "  ⚙️ Cài đặt  ",
         "tab_optimize": "  🚀 Tối ưu FPS  ",
         "tab_log": "  🖥️ Console  ",
+        "tab_browser": "  Browser / Mods  ",
         "mc_dir_label": "Thư mục .minecraft:",
         "btn_choose": "Chọn...",
         "btn_install_fabric": "⬇ Cài / Cập nhật Fabric",
@@ -391,6 +565,17 @@ LANG_STRINGS = {
         "btn_save_console": "💾 Lưu log ra .txt",
         "splash_detect": "Đang xác định vị trí & ngôn ngữ...",
         "splash_load": "Đang tải cấu hình...",
+        "shortcut_title": "Shortcut desktop / Start Menu",
+        "shortcut_install": "Cài shortcut",
+        "shortcut_remove": "Gỡ shortcut",
+        "shortcut_note": "Linux: file .desktop (Debian, Ubuntu, Arch, Manjaro, …). Windows: icon Desktop + Start Menu.",
+        "lang_title": "Ngôn ngữ giao diện",
+        "lang_auto": "Tự động (theo IP / quốc gia)",
+        "lang_vi": "Tiếng Việt",
+        "lang_en": "English",
+        "ver_title": "Phiên bản Minecraft",
+        "ver_note": "Fabric + mod sẽ theo phiên bản đang chọn.",
+        "no_mod_for_ver": "Không có bản mod cho phiên bản {ver} + Fabric.",
     },
     "en": {
         "app_subtitle": "Minecraft {ver} · Fabric · Max FPS optimization",
@@ -399,6 +584,7 @@ LANG_STRINGS = {
         "tab_settings": "  ⚙️ Settings  ",
         "tab_optimize": "  🚀 FPS Optimize  ",
         "tab_log": "  🖥️ Console  ",
+        "tab_browser": "  Browser / Mods  ",
         "mc_dir_label": ".minecraft folder:",
         "btn_choose": "Browse...",
         "btn_install_fabric": "⬇ Install / Update Fabric",
@@ -408,6 +594,17 @@ LANG_STRINGS = {
         "btn_website": "🌐 Website",
         "splash_detect": "Detecting location & language...",
         "splash_load": "Loading configuration...",
+        "shortcut_title": "Desktop / Start Menu shortcut",
+        "shortcut_install": "Install shortcut",
+        "shortcut_remove": "Remove shortcut",
+        "shortcut_note": "Linux: XDG .desktop (Debian, Ubuntu, Arch, Manjaro, …). Windows: Desktop + Start Menu .lnk.",
+        "lang_title": "Interface language",
+        "lang_auto": "Auto (by IP / country)",
+        "lang_vi": "Vietnamese",
+        "lang_en": "English",
+        "ver_title": "Minecraft version",
+        "ver_note": "Fabric + mods follow the selected version.",
+        "no_mod_for_ver": "No mod build for version {ver} + Fabric.",
     },
 }
 
@@ -437,7 +634,23 @@ def detect_language():
 
 
 # --------------------------------------------------------------------------
-MC_VERSION = "1.21.11"
+
+def resolve_language(cfg_lang="auto"):
+    """cfg_lang: 'auto' | 'vi' | 'en' — auto = nhận diện IP (VN→vi)."""
+    if cfg_lang in ("vi", "en"):
+        return cfg_lang
+    return detect_language()
+
+
+
+# Phiên bản Minecraft hỗ trợ (Fabric) — chọn trong Settings / Tổng quan
+MC_VERSIONS = [
+    "1.20.1", "1.20.2", "1.20.3", "1.20.4", "1.20.5", "1.20.6",
+    "1.21", "1.21.1", "1.21.2", "1.21.3", "1.21.4", "1.21.5",
+    "1.21.6", "1.21.7", "1.21.8", "1.21.9", "1.21.10", "1.21.11",
+]
+# mặc định khi chưa có config
+MC_VERSION = "1.21.1"
 DEFAULT_MC_DIR = Path.home() / ".minecraft"
 CONFIG_DIR = Path.home() / ".config" / "arch-client-launcher"
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -479,6 +692,9 @@ def default_config():
     return {
         "mc_dir": str(DEFAULT_MC_DIR), "java_path": "java", "ram_mb": 3072,
         "username": "Player", "azure_client_id": "",
+        "auto_install_shortcuts": True,
+        "mc_version": MC_VERSION,
+        "lang": "auto",  # auto | vi | en
     }
 
 
@@ -535,6 +751,310 @@ def ensure_minecraft_dir(mc_dir: Path) -> dict:
             pass
 
     return {"first_time": first_time, "created": created}
+
+
+
+# ==========================================================================
+# SHORTCUT: Linux .desktop (XDG) + Windows .lnk (Desktop / Start Menu)
+# ==========================================================================
+# Debian / Ubuntu / Mint / Pop!_OS / Arch / Manjaro / EndeavourOS / Garuda /
+# CachyOS / Fedora đều đọc ~/.local/share/applications/*.desktop.
+# Windows 10/11: Desktop + %APPDATA%\Microsoft\Windows\Start Menu\Programs.
+
+SHORTCUT_DESKTOP_ID = "arch-client.desktop"
+SHORTCUT_WINDOWS_NAME = "Arch Client.lnk"
+SHORTCUT_ICON_NAME = "arch-client"
+
+
+def _desktop_quote(value: str) -> str:
+    if re.search(r"""[\s"'\\$`<>~|&;*?!#()\[\]{}]""", value):
+        esc = (value.replace("\\", "\\\\").replace('"', '\\"')
+                    .replace("$", "\\$").replace("`", "\\`"))
+        return f'"{esc}"'
+    return value
+
+
+def linux_applications_dir() -> Path:
+    data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    return Path(data_home) / "applications"
+
+
+def linux_desktop_dir() -> Path:
+    try:
+        r = subprocess.run(["xdg-user-dir", "DESKTOP"], capture_output=True,
+                           text=True, timeout=4)
+        p = Path((r.stdout or "").strip())
+        if r.returncode == 0 and str(p) and p.exists():
+            return p
+    except Exception:
+        pass
+    dirs_file = Path.home() / ".config" / "user-dirs.dirs"
+    if dirs_file.exists():
+        try:
+            for line in dirs_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+                if line.startswith("XDG_DESKTOP_DIR="):
+                    raw = line.split("=", 1)[1].strip().strip('"')
+                    raw = raw.replace("$HOME", str(Path.home()))
+                    p = Path(raw)
+                    if p.exists():
+                        return p
+        except Exception:
+            pass
+    home = Path.home()
+    for name in ("Desktop", "Máy tính", "Bàn làm việc", "Schreibtisch",
+                 "Bureau", "Escritorio", "Pulpit"):
+        cand = home / name
+        if cand.is_dir():
+            return cand
+    return home / "Desktop"
+
+
+def linux_hicolor_root() -> Path:
+    data_home = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share")))
+    return Path(data_home) / "icons" / "hicolor"
+
+
+def install_linux_icons() -> str:
+    if not ICON_PATH.exists():
+        return "minecraft"
+    try:
+        root = linux_hicolor_root()
+        if Image is not None:
+            src_img = Image.open(ICON_PATH).convert("RGBA")
+            for size in (16, 24, 32, 48, 64, 128, 256):
+                dest = root / f"{size}x{size}" / "apps" / f"{SHORTCUT_ICON_NAME}.png"
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                src_img.resize((size, size), Image.LANCZOS).save(dest, "PNG")
+        else:
+            dest = root / "256x256" / "apps" / f"{SHORTCUT_ICON_NAME}.png"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(ICON_PATH, dest)
+        try:
+            subprocess.run(
+                ["gtk-update-icon-cache", "-f", "-t", str(root)],
+                capture_output=True, timeout=8,
+            )
+        except Exception:
+            pass
+        return SHORTCUT_ICON_NAME
+    except Exception:
+        return str(ICON_PATH)
+
+
+def build_desktop_entry(exec_python: str, script_path: Path, icon: str,
+                        working_dir: Path) -> str:
+    exec_line = f"{_desktop_quote(exec_python)} {_desktop_quote(str(script_path))}"
+    comment = f"Minecraft Fabric launcher"
+    return (
+        "[Desktop Entry]\n"
+        "Version=1.0\n"
+        "Type=Application\n"
+        "Name=Arch Client\n"
+        "GenericName=Minecraft Launcher\n"
+        f"Comment={comment}\n"
+        f"Exec={exec_line}\n"
+        f"TryExec={exec_python}\n"
+        f"Icon={icon}\n"
+        f"Path={working_dir}\n"
+        "Terminal=false\n"
+        "StartupNotify=true\n"
+        "Categories=Game;ActionGame;\n"
+        "Keywords=minecraft;fabric;launcher;arch-client;\n"
+        "StartupWMClass=Arch Client\n"
+        "PrefersNonDefaultGPU=false\n"
+        "X-GNOME-UsesNotifications=true\n"
+    )
+
+
+def _mark_linux_desktop_trusted(path: Path) -> None:
+    try:
+        os.chmod(path, 0o755)
+    except Exception:
+        pass
+    for args in (
+        ["gio", "set", str(path), "metadata::trusted", "true"],
+        ["gio", "set", str(path), "metadata::trusted", "yes"],
+    ):
+        try:
+            subprocess.run(args, capture_output=True, timeout=4)
+        except Exception:
+            pass
+
+
+def install_linux_shortcuts() -> dict:
+    apps = linux_applications_dir()
+    apps.mkdir(parents=True, exist_ok=True)
+    desktop = linux_desktop_dir()
+    icon = install_linux_icons()
+    python = sys.executable
+    text = build_desktop_entry(python, Path(__file__).resolve(), icon, APP_DIR)
+    written = []
+    app_file = apps / SHORTCUT_DESKTOP_ID
+    app_file.write_text(text, encoding="utf-8")
+    os.chmod(app_file, 0o755)
+    written.append(str(app_file))
+    desk_file = None
+    try:
+        desktop.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    if desktop.exists():
+        desk_file = desktop / SHORTCUT_DESKTOP_ID
+        desk_file.write_text(text, encoding="utf-8")
+        _mark_linux_desktop_trusted(desk_file)
+        written.append(str(desk_file))
+    for cmd in (
+        ["update-desktop-database", str(apps)],
+        ["xdg-desktop-menu", "forceupdate"],
+    ):
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=8)
+        except Exception:
+            pass
+    return {
+        "files": written,
+        "applications": str(app_file),
+        "desktop": str(desk_file) if desk_file else None,
+    }
+
+
+def windows_desktop_dir() -> Path:
+    userprofile = Path(os.environ.get("USERPROFILE", str(Path.home())))
+    onedrive = os.environ.get("OneDrive")
+    candidates = []
+    if onedrive:
+        candidates.append(Path(onedrive) / "Desktop")
+    candidates.append(userprofile / "Desktop")
+    public = os.environ.get("PUBLIC")
+    if public:
+        candidates.append(Path(public) / "Desktop")
+    for c in candidates:
+        if c.is_dir():
+            return c
+    return userprofile / "Desktop"
+
+
+def windows_start_menu_dir() -> Path:
+    appdata = Path(os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")))
+    d = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def windows_python_target() -> Path:
+    exe = Path(sys.executable)
+    if exe.name.lower() in ("python.exe", "python3.exe"):
+        pythonw = exe.with_name("pythonw.exe")
+        if pythonw.exists():
+            return pythonw
+    return exe
+
+
+def windows_ico_path():
+    dest = CONFIG_DIR / "arch-client.ico"
+    if dest.exists() and dest.stat().st_size > 0:
+        return dest
+    if Image is None or not ICON_PATH.exists():
+        return dest if dest.exists() else None
+    try:
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        img = Image.open(ICON_PATH).convert("RGBA")
+        img.save(dest, format="ICO",
+                 sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+        return dest
+    except Exception:
+        return None
+
+
+def _ps_single(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def install_windows_shortcuts() -> dict:
+    target = str(windows_python_target())
+    script = str(Path(__file__).resolve())
+    workdir = str(APP_DIR)
+    ico = windows_ico_path()
+    icon_loc = f"{ico},0" if ico else f"{target},0"
+    desktop = windows_desktop_dir()
+    start = windows_start_menu_dir()
+    desktop.mkdir(parents=True, exist_ok=True)
+    links = [str(desktop / SHORTCUT_WINDOWS_NAME), str(start / SHORTCUT_WINDOWS_NAME)]
+    arg = f'"{script}"'
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        "$W = New-Object -ComObject WScript.Shell",
+        "function New-ArchShortcut([string]$Path) {",
+        "  $s = $W.CreateShortcut($Path)",
+        f"  $s.TargetPath = {_ps_single(target)}",
+        f"  $s.Arguments = {_ps_single(arg)}",
+        f"  $s.WorkingDirectory = {_ps_single(workdir)}",
+        f"  $s.Description = {_ps_single('Arch Client — Minecraft Fabric Launcher')}",
+        "  $s.WindowStyle = 1",
+        f"  $s.IconLocation = {_ps_single(icon_loc)}",
+        "  $s.Save()",
+        "}",
+    ]
+    for link in links:
+        lines.append(f"New-ArchShortcut {_ps_single(link)}")
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    ps_file = CONFIG_DIR / "_mk_shortcut.ps1"
+    ps_file.write_text("\n".join(lines) + "\n", encoding="utf-8-sig")
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ps_file)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "PowerShell failed").strip()
+            raise RuntimeError(err)
+    finally:
+        try:
+            ps_file.unlink()
+        except Exception:
+            pass
+    return {"files": links, "desktop": links[0], "start_menu": links[1]}
+
+
+def shortcut_locations() -> dict:
+    system = platform.system()
+    if system == "Windows":
+        return {
+            "desktop": str(windows_desktop_dir() / SHORTCUT_WINDOWS_NAME),
+            "menu": str(windows_start_menu_dir() / SHORTCUT_WINDOWS_NAME),
+        }
+    if system == "Linux":
+        return {
+            "desktop": str(linux_desktop_dir() / SHORTCUT_DESKTOP_ID),
+            "menu": str(linux_applications_dir() / SHORTCUT_DESKTOP_ID),
+        }
+    return {}
+
+
+def shortcuts_present() -> bool:
+    locs = shortcut_locations()
+    return any(Path(p).exists() for p in locs.values()) if locs else False
+
+
+def remove_installed_shortcuts() -> list:
+    removed = []
+    for p in shortcut_locations().values():
+        path = Path(p)
+        if path.exists():
+            path.unlink()
+            removed.append(str(path))
+    return removed
+
+
+def install_os_shortcuts() -> dict:
+    system = platform.system()
+    if system == "Linux":
+        return {"os": "Linux", **install_linux_shortcuts()}
+    if system == "Windows":
+        return {"os": "Windows", **install_windows_shortcuts()}
+    raise RuntimeError(
+        f"OS chưa hỗ trợ tự cài shortcut (chỉ Linux & Windows): {system or 'unknown'}"
+    )
 
 
 # ==========================================================================
@@ -652,67 +1172,30 @@ def install_java_via_pkg_manager(osinfo, java_major=JAVA_MAJOR_REQUIRED) -> bool
 
 
 
-    """Màn hình chờ khi khởi động, giống launcher thương mại thật."""
-
-    def __init__(self):
-        super().__init__(themename="flatly")
-        self.overrideredirect(True)
-        w, h = 460, 380
-        self.update_idletasks()
-        x = (self.winfo_screenwidth() - w) // 2
-        y = (self.winfo_screenheight() - h) // 2
-        self.geometry(f"{w}x{h}+{x}+{y}")
-        self.configure(bg="#2f7cf6")
-
-        self._icon_full = load_icon_image()
-        if self._icon_full:
-            self.iconphoto(True, self._icon_full)
-
-        outer = tb.Frame(self, bootstyle="primary")
-        outer.pack(fill="both", expand=True)
-
-        self._logo_img = load_icon_image(size=(72, 72))
-        if self._logo_img:
-            tb.Label(outer, image=self._logo_img, bootstyle="inverse-primary").pack(pady=(24, 0))
-        else:
-            tb.Label(outer, text="⚡", font=("", 40), bootstyle="inverse-primary").pack(pady=(24, 0))
-        tb.Label(outer, text="ARCH CLIENT", font=("", 16, "bold"),
-                  bootstyle="inverse-primary").pack(pady=(4, 2))
-        tb.Label(outer, text=f"Minecraft {MC_VERSION} · Fabric", font=("", 9),
-                  bootstyle="inverse-primary").pack()
-
-        self._banner_img = load_banner_image(max_width=340)
-        if self._banner_img:
-            tb.Label(outer, image=self._banner_img, bootstyle="inverse-primary").pack(pady=(10, 0))
-
-        self.status_lbl = tb.Label(outer, text="Đang khởi động...", font=("", 9),
-                                     bootstyle="secondary-inverse-primary")
-        self.status_lbl.pack(pady=(16, 6))
-
-        self.bar = tb.Progressbar(outer, bootstyle="success-striped",
-                                    mode="indeterminate", length=340)
-        self.bar.pack(pady=(0, 16))
-        self.bar.start(12)
-
-    def set_status(self, text):
-        self.status_lbl.config(text=text)
-        self.update_idletasks()
-
-
 class App(tb.Window):
     def __init__(self, lang="vi"):
         super().__init__(themename="flatly")
-        self.lang = lang
-        self.LANG = LANG_STRINGS[lang]
-        self.title("⚡ Arch Client — Minecraft " + MC_VERSION)
-        self.geometry("880x640")
-        self.minsize(760, 560)
+        self.cfg = load_config()
+        # ngôn ngữ: config (auto/vi/en) ưu tiên hơn tham số splash nếu user đã chọn tay
+        cfg_lang = self.cfg.get("lang", "auto")
+        if cfg_lang in ("vi", "en"):
+            lang = cfg_lang
+        self.lang = lang if lang in LANG_STRINGS else "en"
+        self.LANG = LANG_STRINGS[self.lang]
+
+        ver = self.cfg.get("mc_version") or MC_VERSION
+        if ver not in MC_VERSIONS:
+            MC_VERSIONS.append(ver)
+        self.mc_version = ver
+
+        self.title("Arch Client — Minecraft " + self.mc_version)
+        self.geometry("920x680")
+        self.minsize(780, 580)
 
         self._icon_full = load_icon_image()
         if self._icon_full:
             self.iconphoto(True, self._icon_full)
 
-        self.cfg = load_config()
         self.mc_dir = Path(self.cfg["mc_dir"])
         self.access_token = None
         self.uuid = None
@@ -751,33 +1234,50 @@ class App(tb.Window):
         # Discord Rich Presence — hiện đang làm gì / tải gì ngay trên Discord.
         self.after(300, self._init_discord_rpc)
 
+        # Tự cài .desktop (Linux) / Start Menu + Desktop (Windows) nếu chưa có.
+        self.after(400, self.install_shortcuts_startup)
+
+        # HUD: pulse status nhẹ + fade-in notebook (không lòe loẹt).
+        self._status_pulse_on = True
+        self.after(600, self._pulse_status_badge)
+        self.after(50, self._fade_in_body)
+
     # ---------------------------------------------------------------- header
     def _build_header(self):
-        header = tb.Frame(self, bootstyle="primary", padding=18)
+        # Header gọn: logo bo góc + title, status bên phải — tránh logo nhỏ méo góc cứng.
+        header = tb.Frame(self, bootstyle="primary", padding=(16, 14))
         header.pack(fill="x")
 
         left = tb.Frame(header, bootstyle="primary")
-        left.pack(side="left")
+        left.pack(side="left", fill="y")
+
         title_row = tb.Frame(left, bootstyle="primary")
         title_row.pack(anchor="w")
-        self._header_logo = load_icon_image(size=(28, 28))
+
+        self._header_logo = load_icon_image(size=(36, 36), rounded=True)
         if self._header_logo:
             tb.Label(title_row, image=self._header_logo, bootstyle="inverse-primary").pack(
-                side="left", padx=(0, 8))
-            tb.Label(title_row, text="ARCH CLIENT", font=("", 20, "bold"),
-                      bootstyle="inverse-primary").pack(side="left")
-        else:
-            tb.Label(title_row, text="⚡ ARCH CLIENT", font=("", 20, "bold"),
-                      bootstyle="inverse-primary").pack(side="left")
-        tb.Label(left, text=self.LANG["app_subtitle"].format(ver=MC_VERSION),
-                  font=("", 10), bootstyle="inverse-primary").pack(anchor="w")
+                side="left", padx=(0, 10))
+        tb.Label(title_row, text="ARCH CLIENT", font=("", 18, "bold"),
+                  bootstyle="inverse-primary").pack(side="left")
+
+        tb.Label(
+            left,
+            text=self.LANG["app_subtitle"].format(ver=self.mc_version),
+            font=("", 9),
+            bootstyle="inverse-primary",
+        ).pack(anchor="w", pady=(2, 0))
 
         right = tb.Frame(header, bootstyle="primary")
         right.pack(side="right")
-        self.status_badge = tb.Label(right, text=f"● {self.LANG['status_ready']}",
-                                      bootstyle="success-inverse-primary",
-                                      font=("", 10, "bold"))
-        self.status_badge.pack(anchor="e")
+        self.status_badge = tb.Label(
+            right,
+            text=f"● {self.LANG['status_ready']}",
+            bootstyle="inverse-success",
+            font=("", 10, "bold"),
+        )
+        self.status_badge.pack(anchor="e", pady=(4, 0))
+        self._status_text_base = self.LANG["status_ready"]
 
     # ------------------------------------------------------------------ body
     def _build_body(self):
@@ -787,22 +1287,26 @@ class App(tb.Window):
         self.tab_overview = tb.Frame(self.nb, padding=14)
         self.tab_settings = tb.Frame(self.nb, padding=14)
         self.tab_optimize = tb.Frame(self.nb, padding=14)
+        self.tab_browser = tb.Frame(self.nb, padding=8)
         self.tab_log = tb.Frame(self.nb, padding=10)
 
         self.nb.add(self.tab_overview, text=self.LANG["tab_overview"])
         self.nb.add(self.tab_settings, text=self.LANG["tab_settings"])
         self.nb.add(self.tab_optimize, text=self.LANG["tab_optimize"])
+        self.nb.add(self.tab_browser, text=self.LANG.get("tab_browser", "  Browser  "))
         self.nb.add(self.tab_log, text=self.LANG["tab_log"])
 
         self._build_overview_tab()
         self._build_settings_tab()
         self._build_optimize_tab()
+        self._build_browser_tab()
         self._build_log_tab()
 
         self._discord_tab_states = {
             str(self.tab_overview): "Đang xem: Tổng quan",
             str(self.tab_settings): "Đang xem: Cài đặt",
             str(self.tab_optimize): "Đang xem: Tối ưu FPS",
+            str(self.tab_browser): "Đang duyệt: Browser (chống tracker)",
             str(self.tab_log): "Đang xem: Console",
         }
         self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
@@ -834,9 +1338,20 @@ class App(tb.Window):
     def _build_overview_tab(self):
         f = self.tab_overview
 
-        self._overview_banner = load_banner_image(max_width=760)
-        if self._overview_banner:
-            tb.Label(f, image=self._overview_banner).pack(anchor="w", pady=(0, 12))
+        # Hàng phiên bản Minecraft (không banner)
+        verbar = tb.Frame(f)
+        verbar.pack(fill="x", pady=(0, 10))
+        tb.Label(verbar, text=self.LANG.get("ver_title", "Phiên bản Minecraft") + ":",
+                  font=("", 9, "bold")).pack(side="left")
+        self.ver_var = tk.StringVar(value=self.mc_version)
+        self.ver_combo = tb.Combobox(
+            verbar, textvariable=self.ver_var, values=MC_VERSIONS,
+            width=12, bootstyle="primary", state="readonly",
+        )
+        self.ver_combo.pack(side="left", padx=8)
+        self.ver_combo.bind("<<ComboboxSelected>>", self._on_version_changed)
+        tb.Label(verbar, text=self.LANG.get("ver_note", ""),
+                  bootstyle="secondary", font=("", 8)).pack(side="left", padx=(4, 0))
 
         dirbar = tb.Frame(f)
         dirbar.pack(fill="x", pady=(0, 12))
@@ -909,15 +1424,49 @@ class App(tb.Window):
         f = self.tab_settings
         pad = {"pady": 8}
 
-        tb.Label(f, text="Java", font=("", 11, "bold")).grid(row=0, column=0, sticky="w", **pad)
+        # ---- Ngôn ngữ ----
+        tb.Label(f, text=self.LANG.get("lang_title", "Ngôn ngữ"), font=("", 11, "bold")).grid(
+            row=0, column=0, sticky="w", **pad)
+        self.lang_var = tk.StringVar(value=self.cfg.get("lang", "auto"))
+        lang_row = tb.Frame(f)
+        lang_row.grid(row=0, column=1, columnspan=2, sticky="w", **pad)
+        for val, key in (("auto", "lang_auto"), ("vi", "lang_vi"), ("en", "lang_en")):
+            tb.Radiobutton(
+                lang_row, text=self.LANG.get(key, val), value=val,
+                variable=self.lang_var, bootstyle="primary-toolbutton",
+                command=self._on_lang_setting_changed,
+            ).pack(side="left", padx=(0, 8))
+        tb.Label(
+            f,
+            text="Tự động = nhận diện theo IP (VN → Tiếng Việt).",
+            bootstyle="secondary", font=("", 8),
+        ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(0, 6))
+
+        # ---- Phiên bản MC ----
+        tb.Label(f, text=self.LANG.get("ver_title", "Phiên bản Minecraft"),
+                  font=("", 11, "bold")).grid(row=2, column=0, sticky="w", **pad)
+        self.settings_ver_var = tk.StringVar(value=self.mc_version)
+        ver_row = tb.Frame(f)
+        ver_row.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
+        self.settings_ver_combo = tb.Combobox(
+            ver_row, textvariable=self.settings_ver_var, values=MC_VERSIONS,
+            width=14, bootstyle="primary", state="readonly",
+        )
+        self.settings_ver_combo.pack(side="left")
+        self.settings_ver_combo.bind("<<ComboboxSelected>>", self._on_version_changed)
+        tb.Label(ver_row, text=self.LANG.get("ver_note", ""),
+                  bootstyle="secondary", font=("", 8)).pack(side="left", padx=10)
+
+        # ---- Java ----
+        tb.Label(f, text="Java", font=("", 11, "bold")).grid(row=3, column=0, sticky="w", **pad)
         self.java_var = tk.StringVar(value=self.cfg["java_path"])
         tb.Entry(f, textvariable=self.java_var, width=45, bootstyle="primary").grid(
-            row=0, column=1, sticky="w", **pad)
+            row=3, column=1, sticky="w", **pad)
         tb.Button(f, text="Chọn file...", bootstyle="secondary-outline",
-                   command=self.choose_java).grid(row=0, column=2, sticky="w", padx=6)
+                   command=self.choose_java).grid(row=3, column=2, sticky="w", padx=6)
 
         java_row = tb.Frame(f)
-        java_row.grid(row=1, column=1, columnspan=2, sticky="w", pady=(0, 6))
+        java_row.grid(row=4, column=1, columnspan=2, sticky="w", pady=(0, 6))
         self.java_status_lbl = tb.Label(java_row, text="☕ Chưa kiểm tra Java",
                                           bootstyle="secondary", font=("", 9))
         self.java_status_lbl.pack(side="left")
@@ -925,39 +1474,49 @@ class App(tb.Window):
                    command=self.install_java_thread).pack(side="left", padx=(12, 0))
 
         tb.Label(f, text="RAM cấp cho game", font=("", 11, "bold")).grid(
-            row=2, column=0, sticky="w", **pad)
+            row=5, column=0, sticky="w", **pad)
         ram_wrap = tb.Frame(f)
-        ram_wrap.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
-        self.ram_var = tk.IntVar(value=self.cfg["ram_mb"])
-        self.ram_scale = tb.Scale(ram_wrap, from_=1024, to=16384, orient="horizontal",
-                                    variable=self.ram_var, length=320, bootstyle="info",
-                                    command=self._on_ram_change)
-        self.ram_scale.pack(side="left")
-        self.ram_lbl = tb.Label(ram_wrap, text=f"{self.ram_var.get()} MB", width=10,
-                                  font=("", 10, "bold"))
-        self.ram_lbl.pack(side="left", padx=10)
+        ram_wrap.grid(row=5, column=1, sticky="w", **pad)
+        self.ram_var = tk.IntVar(value=int(self.cfg.get("ram_mb", 3072)))
+        tb.Spinbox(ram_wrap, from_=1024, to=32768, increment=512,
+                    textvariable=self.ram_var, width=10, bootstyle="primary").pack(side="left")
+        tb.Label(ram_wrap, text=" MB", bootstyle="secondary").pack(side="left")
 
         tb.Label(f, text="Tên người chơi", font=("", 11, "bold")).grid(
-            row=3, column=0, sticky="w", **pad)
-        self.user_var = tk.StringVar(value=self.cfg["username"])
-        tb.Entry(f, textvariable=self.user_var, width=25, bootstyle="primary").grid(
-            row=3, column=1, sticky="w", **pad)
+            row=6, column=0, sticky="w", **pad)
+        self.user_var = tk.StringVar(value=self.cfg.get("username", "Player"))
+        tb.Entry(f, textvariable=self.user_var, width=30, bootstyle="primary").grid(
+            row=6, column=1, sticky="w", **pad)
 
-        tb.Label(f, text="Azure client_id\n(login Microsoft)", font=("", 11, "bold")).grid(
-            row=4, column=0, sticky="w", **pad)
-        self.client_id_var = tk.StringVar(value=self.cfg["azure_client_id"])
+        tb.Label(f, text="Azure client_id", font=("", 11, "bold")).grid(
+            row=7, column=0, sticky="w", **pad)
+        self.client_id_var = tk.StringVar(value=self.cfg.get("azure_client_id", ""))
         tb.Entry(f, textvariable=self.client_id_var, width=45, bootstyle="primary").grid(
-            row=4, column=1, sticky="w", **pad)
-        tb.Button(f, text="🔑 Login Microsoft", bootstyle="warning-outline",
-                   command=self.login_microsoft_thread).grid(row=4, column=2, sticky="w", padx=6)
+            row=7, column=1, sticky="w", **pad)
+        tb.Button(f, text="Login Microsoft", bootstyle="info-outline",
+                   command=self.login_microsoft_thread).grid(row=7, column=2, sticky="w", padx=6)
 
         tb.Button(f, text="💾 Lưu cài đặt", bootstyle="success",
-                   command=self.save_settings).grid(row=5, column=1, sticky="w", pady=18)
+                   command=self.save_settings).grid(row=8, column=1, sticky="w", pady=12)
 
-        note = ("Để trống Azure client_id → chạy chế độ offline/dev "
-                "(chơi singleplayer hoặc server online-mode=false).")
-        tb.Label(f, text=note, bootstyle="secondary", wraplength=520,
-                  justify="left").grid(row=6, column=0, columnspan=3, sticky="w", pady=6)
+        # ---- Shortcuts ----
+        tb.Separator(f).grid(row=9, column=0, columnspan=3, sticky="ew", pady=(4, 8))
+        tb.Label(f, text=self.LANG.get("shortcut_title", "Shortcut"),
+                  font=("", 11, "bold")).grid(row=10, column=0, columnspan=3, sticky="w")
+        self.shortcut_status_lbl = tb.Label(f, text="…", bootstyle="secondary", font=("", 9))
+        self.shortcut_status_lbl.grid(row=11, column=0, columnspan=3, sticky="w", pady=(4, 8))
+        sc_btns = tb.Frame(f)
+        sc_btns.grid(row=12, column=0, columnspan=3, sticky="w")
+        tb.Button(sc_btns, text=self.LANG.get("shortcut_install", "Cài shortcut"),
+                   bootstyle="info", command=self.install_shortcuts_thread).pack(side="left")
+        tb.Button(sc_btns, text=self.LANG.get("shortcut_remove", "Gỡ shortcut"),
+                   bootstyle="secondary-outline",
+                   command=self.remove_shortcuts_thread).pack(side="left", padx=(10, 0))
+        tb.Label(f, text=self.LANG.get("shortcut_note", ""),
+                  bootstyle="secondary", wraplength=620, justify="left").grid(
+            row=13, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.after(0, self._refresh_shortcut_status)
+
 
     def _on_ram_change(self, val):
         self.ram_lbl.config(text=f"{int(float(val))} MB")
@@ -968,13 +1527,80 @@ class App(tb.Window):
             self.java_var.set(p)
 
     def save_settings(self):
+        # đồng bộ version từ combo nào đang có
+        ver = None
+        if hasattr(self, "settings_ver_var"):
+            ver = self.settings_ver_var.get().strip()
+        elif hasattr(self, "ver_var"):
+            ver = self.ver_var.get().strip()
+        if ver:
+            self.mc_version = ver
+            self.cfg["mc_version"] = ver
+        if hasattr(self, "lang_var"):
+            self.cfg["lang"] = self.lang_var.get()
         self.cfg.update({
             "java_path": self.java_var.get(), "ram_mb": int(self.ram_var.get()),
             "username": self.user_var.get(), "azure_client_id": self.client_id_var.get(),
             "mc_dir": str(self.mc_dir),
         })
         save_config(self.cfg)
-        self.log("✅ Đã lưu cài đặt.")
+        self.title("Arch Client — Minecraft " + self.mc_version)
+        try:
+            if hasattr(self, "ver_var"):
+                self.ver_var.set(self.mc_version)
+            if hasattr(self, "settings_ver_var"):
+                self.settings_ver_var.set(self.mc_version)
+        except Exception:
+            pass
+        self.log(f"✅ Đã lưu cài đặt (MC {self.mc_version}, lang={self.cfg.get('lang')}).")
+
+    def _on_version_changed(self, _event=None):
+        """Đổi phiên bản MC: cập nhật config, title, gợi ý cài lại Fabric."""
+        ver = None
+        if _event is not None:
+            w = _event.widget
+            try:
+                ver = w.get()
+            except Exception:
+                ver = None
+        if not ver:
+            if hasattr(self, "settings_ver_var"):
+                ver = self.settings_ver_var.get()
+            elif hasattr(self, "ver_var"):
+                ver = self.ver_var.get()
+        if not ver:
+            return
+        self.mc_version = ver
+        self.cfg["mc_version"] = ver
+        save_config(self.cfg)
+        self.title("Arch Client — Minecraft " + ver)
+        try:
+            if hasattr(self, "ver_var"):
+                self.ver_var.set(ver)
+            if hasattr(self, "settings_ver_var"):
+                self.settings_ver_var.set(ver)
+        except Exception:
+            pass
+        try:
+            self.LANG  # refresh subtitle if header label exists
+            # header subtitle is static label — rebuild text via children scan skip
+        except Exception:
+            pass
+        self.log(f"🎮 Phiên bản chơi: {ver} — bấm «Cài / Cập nhật Fabric» để khớp loader.")
+        self.set_discord_activity(f"Phiên bản {ver}", "Arch Client")
+
+    def _on_lang_setting_changed(self):
+        """Lưu lựa chọn ngôn ngữ; áp dụng ngay nếu vi/en (auto cần restart)."""
+        choice = self.lang_var.get()
+        self.cfg["lang"] = choice
+        save_config(self.cfg)
+        if choice in ("vi", "en"):
+            self.lang = choice
+            self.LANG = LANG_STRINGS[choice]
+            self.log(f"🌐 Ngôn ngữ: {choice} — một số nhãn tab áp dụng sau khi mở lại launcher.")
+        else:
+            detected = detect_language()
+            self.log(f"🌐 Ngôn ngữ: tự động (IP → {detected}). Mở lại launcher để áp dụng đầy đủ.")
 
     # ------------------------------------------------------------- Java
     def _set_java_status(self, text, bootstyle="secondary"):
@@ -1009,7 +1635,7 @@ class App(tb.Window):
                     return
 
             if exe and version:
-                self.log(f"⚠ Java hiện tại là bản {version}, Minecraft {MC_VERSION} "
+                self.log(f"⚠ Java hiện tại là bản {version}, Minecraft {self.mc_version} "
                           f"cần Java {JAVA_MAJOR_REQUIRED}+ — sẽ tự động cài bản phù hợp.")
             else:
                 self.log(f"⚠ Chưa tìm thấy Java trên máy — sẽ tự động cài OpenJDK "
@@ -1025,7 +1651,7 @@ class App(tb.Window):
 
     def _install_java_auto(self):
         try:
-            self.set_status("Đang cài Java...", "warning-inverse-primary")
+            self.set_status("Đang cài Java...", "inverse-warning")
             self._set_java_status("☕ Đang cài đặt...", "warning")
             self.log(f"☕ Bắt đầu cài OpenJDK {JAVA_MAJOR_REQUIRED}...")
 
@@ -1056,7 +1682,7 @@ class App(tb.Window):
                 self.log("❌ Thiếu thư viện 'requests' nên không thể tự tải Java. "
                           "Cài thủ công: pip install requests --break-system-packages")
                 self._set_java_status("☕ Cần cài Java thủ công", "danger")
-                self.set_status("Lỗi", "danger-inverse-primary")
+                self.set_status("Lỗi", "inverse-danger")
                 return
 
             url, ext = adoptium_download_info(JAVA_MAJOR_REQUIRED)
@@ -1065,7 +1691,7 @@ class App(tb.Window):
                           f"({OS_INFO.get('pretty')}). Vui lòng cài Java {JAVA_MAJOR_REQUIRED}+ thủ công "
                           "rồi chọn file java trong mục Cài đặt.")
                 self._set_java_status("☕ Cần cài Java thủ công", "danger")
-                self.set_status("Lỗi", "danger-inverse-primary")
+                self.set_status("Lỗi", "inverse-danger")
                 return
 
             JRE_DIR.mkdir(parents=True, exist_ok=True)
@@ -1100,7 +1726,7 @@ class App(tb.Window):
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
             self._set_java_status("☕ Cài Java thất bại", "danger")
-            self.set_status("Lỗi", "danger-inverse-primary")
+            self.set_status("Lỗi", "inverse-danger")
 
     # -------------------------------------------------------- optimize tab
     def _build_optimize_tab(self):
@@ -1127,6 +1753,434 @@ class App(tb.Window):
         tb.Button(f, text="🚀 Áp dụng tối ưu FPS ngay", bootstyle="success",
                    command=self.apply_optimization_thread).pack(anchor="w")
 
+    # ----------------------------------------------------------- Browser tab
+    def _build_browser_tab(self):
+        """Tab Browser luôn hiện: tìm/tải mod Modrinth + mở trang web (nhúng nếu có)."""
+        f = self.tab_browser
+        self._browser_history = []
+        self._browser_hist_i = -1
+        self._html_frame = None
+        self._browser_mode = "mods"  # mods | web
+
+        tip = tb.Label(
+            f,
+            text="Browser mod · tìm & tải từ Modrinth · chống tracker khi mở web",
+            bootstyle="secondary",
+            font=("", 8),
+        )
+        tip.pack(anchor="w", pady=(0, 6))
+
+        mode_bar = tb.Frame(f)
+        mode_bar.pack(fill="x", pady=(0, 6))
+        self._btn_mode_mods = tb.Button(
+            mode_bar, text="Kho mod (Modrinth)", bootstyle="info",
+            command=lambda: self._browser_show_mode("mods"),
+        )
+        self._btn_mode_mods.pack(side="left", padx=(0, 6))
+        self._btn_mode_web = tb.Button(
+            mode_bar, text="Trang web", bootstyle="secondary-outline",
+            command=lambda: self._browser_show_mode("web"),
+        )
+        self._btn_mode_web.pack(side="left", padx=(0, 6))
+        tb.Button(
+            mode_bar, text="Cài engine browser", bootstyle="secondary-outline",
+            command=self._browser_reinstall_deps,
+        ).pack(side="right")
+
+        # ---- panel: search mods (luôn hoạt động với requests) ----
+        self._panel_mods = tb.Frame(f)
+        self._panel_mods.pack(fill="both", expand=True)
+
+        search_row = tb.Frame(self._panel_mods)
+        search_row.pack(fill="x", pady=(0, 6))
+        tb.Label(search_row, text="Tìm mod:", font=("", 9, "bold")).pack(side="left")
+        self.mod_search_var = tk.StringVar(value="sodium")
+        ent = tb.Entry(search_row, textvariable=self.mod_search_var, bootstyle="primary")
+        ent.pack(side="left", fill="x", expand=True, padx=8)
+        ent.bind("<Return>", lambda e: self._modrinth_search())
+        tb.Button(search_row, text="Tìm", bootstyle="primary",
+                   command=self._modrinth_search).pack(side="left", padx=(0, 4))
+        tb.Button(search_row, text="Tải đã chọn", bootstyle="success",
+                   command=self._modrinth_download_selected).pack(side="left")
+
+        self.browser_status = tb.Label(
+            self._panel_mods,
+            text="Gõ tên mod → Tìm → chọn dòng → Tải (vào thư mục mods)",
+            bootstyle="secondary", font=("", 8),
+        )
+        self.browser_status.pack(anchor="w", pady=(0, 4))
+
+        list_wrap = tb.Frame(self._panel_mods)
+        list_wrap.pack(fill="both", expand=True)
+        cols = ("name", "downloads", "ver")
+        self.mod_tree = tb.Treeview(
+            list_wrap, columns=cols, show="headings", bootstyle="primary", height=12,
+        )
+        self.mod_tree.heading("name", text="Mod")
+        self.mod_tree.heading("downloads", text="Lượt tải")
+        self.mod_tree.heading("ver", text="Game")
+        self.mod_tree.column("name", width=360, anchor="w")
+        self.mod_tree.column("downloads", width=100, anchor="e")
+        self.mod_tree.column("ver", width=120, anchor="w")
+        self.mod_tree.pack(side="left", fill="both", expand=True)
+        sb = tb.Scrollbar(list_wrap, orient="vertical", command=self.mod_tree.yview,
+                           bootstyle="round-primary")
+        sb.pack(side="right", fill="y")
+        self.mod_tree.configure(yscrollcommand=sb.set)
+        self._mod_results = []  # list of dict from API
+
+        # ---- panel: web (nhúng hoặc cửa sổ) ----
+        self._panel_web = tb.Frame(f)
+
+        bar = tb.Frame(self._panel_web)
+        bar.pack(fill="x", pady=(0, 6))
+        tb.Button(bar, text="◀", width=3, bootstyle="secondary-outline",
+                   command=self._browser_back).pack(side="left", padx=(0, 2))
+        tb.Button(bar, text="▶", width=3, bootstyle="secondary-outline",
+                   command=self._browser_forward).pack(side="left", padx=(0, 2))
+        tb.Button(bar, text="↻", width=3, bootstyle="secondary-outline",
+                   command=self._browser_reload).pack(side="left", padx=(0, 4))
+        tb.Button(bar, text="Home", bootstyle="info-outline",
+                   command=self._browser_go_home).pack(side="left", padx=(0, 6))
+        self.browser_url_var = tk.StringVar(value=BROWSER_HOME)
+        url_entry = tb.Entry(bar, textvariable=self.browser_url_var, bootstyle="primary")
+        url_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        url_entry.bind("<Return>", lambda e: self._browser_go())
+        tb.Button(bar, text="Go", bootstyle="primary",
+                   command=self._browser_go).pack(side="left", padx=(0, 4))
+        tb.Button(bar, text="Cửa sổ riêng", bootstyle="secondary-outline",
+                   command=self._browser_open_secure_window).pack(side="left")
+
+        quick = tb.Frame(self._panel_web)
+        quick.pack(fill="x", pady=(0, 6))
+        tb.Button(quick, text="Modrinth", bootstyle="secondary-outline",
+                   command=self._browser_go_home).pack(side="left", padx=(0, 6))
+        tb.Button(
+            quick, text="CurseForge", bootstyle="secondary-outline",
+            command=lambda: self._browser_navigate(
+                "https://www.curseforge.com/minecraft/search?class=mc-mods"
+                f"&page=1&pageSize=20&sortBy=relevancy&gameVersion={self.mc_version}"
+            ),
+        ).pack(side="left", padx=(0, 6))
+        tb.Button(
+            quick, text="Planet MC", bootstyle="secondary-outline",
+            command=lambda: self._browser_navigate(
+                "https://www.planetminecraft.com/resources/mods/?order=order_popularity"
+            ),
+        ).pack(side="left", padx=(0, 6))
+
+        self.browser_web_status = tb.Label(
+            self._panel_web, text="", bootstyle="secondary", font=("", 8),
+        )
+        self.browser_web_status.pack(anchor="w", pady=(0, 4))
+
+        self._browser_host = tb.Frame(self._panel_web, bootstyle="secondary")
+        self._browser_host.pack(fill="both", expand=True)
+
+        self._browser_init_engine()
+        # Mặc định hiện kho mod — luôn thấy UI, không phụ thuộc WebKit
+        self._browser_show_mode("mods")
+        self.after(400, self._modrinth_search)
+
+    def _browser_show_mode(self, mode):
+        self._browser_mode = mode
+        if mode == "mods":
+            self._panel_web.pack_forget()
+            self._panel_mods.pack(fill="both", expand=True)
+            try:
+                self._btn_mode_mods.configure(bootstyle="info")
+                self._btn_mode_web.configure(bootstyle="secondary-outline")
+            except Exception:
+                pass
+        else:
+            self._panel_mods.pack_forget()
+            self._panel_web.pack(fill="both", expand=True)
+            try:
+                self._btn_mode_web.configure(bootstyle="info")
+                self._btn_mode_mods.configure(bootstyle="secondary-outline")
+            except Exception:
+                pass
+            if self._html_frame is None:
+                self._browser_init_engine()
+
+    def _browser_init_engine(self):
+        """Thử gắn HtmlFrame vào panel web; không được thì hiện hướng dẫn rõ."""
+        for w in self._browser_host.winfo_children():
+            try:
+                w.destroy()
+            except Exception:
+                pass
+        self._html_frame = None
+        global TkHtmlFrame
+        if TkHtmlFrame is None:
+            try:
+                from tkinterweb import HtmlFrame as _HF
+                TkHtmlFrame = _HF
+            except Exception:
+                TkHtmlFrame = None
+        if TkHtmlFrame is not None:
+            try:
+                self._html_frame = TkHtmlFrame(self._browser_host, messages_enabled=False)
+                self._html_frame.pack(fill="both", expand=True)
+                self.browser_web_status.config(
+                    text="Engine nhúng OK · anti-tracker bật")
+                self.after(200, lambda: self._browser_navigate(BROWSER_HOME, push=True))
+                return
+            except Exception as e:
+                self._html_frame = None
+                self.log(f"ℹ Browser nhúng lỗi: {e}")
+        help_box = tb.Frame(self._browser_host, padding=14)
+        help_box.pack(fill="both", expand=True)
+        tb.Label(help_box, text="Chưa có engine trang web nhúng",
+                  font=("", 11, "bold")).pack(anchor="w")
+        tb.Label(
+            help_box,
+            text=("Tab «Kho mod» vẫn dùng được ngay (không cần WebKit).\n"
+                  "Muốn xem trang web đầy đủ trong launcher: bấm «Cài engine browser» "
+                  "rồi khởi động lại — hoặc «Cửa sổ riêng»."),
+            bootstyle="secondary", wraplength=620, justify="left",
+        ).pack(anchor="w", pady=(8, 10))
+        tb.Button(help_box, text="Mở cửa sổ web an toàn", bootstyle="info",
+                   command=self._browser_open_secure_window).pack(anchor="w")
+        self.browser_web_status.config(text="Dùng Kho mod hoặc Cửa sổ riêng")
+
+    def _browser_set_status(self, text):
+        try:
+            self.browser_status.config(text=text)
+        except Exception:
+            pass
+        try:
+            self.browser_web_status.config(text=text)
+        except Exception:
+            pass
+
+    def _modrinth_search(self):
+        if requests is None:
+            self._browser_set_status("Thiếu thư viện requests")
+            return
+        q = (self.mod_search_var.get() or "").strip()
+        if not q:
+            self._browser_set_status("Nhập từ khóa tìm mod")
+            return
+        self._browser_set_status(f"Đang tìm «{q}» trên Modrinth…")
+
+        def job():
+            try:
+                # facets: fabric + game version
+                facets = f'[["categories:fabric"],["versions:{self.mc_version}"]]'
+                params = {
+                    "query": q,
+                    "limit": 20,
+                    "index": "relevance",
+                    "facets": facets,
+                }
+                r = requests.get(
+                    "https://api.modrinth.com/v2/search",
+                    params=params, timeout=20,
+                    headers={"User-Agent": "ArchClient/2.0"},
+                )
+                r.raise_for_status()
+                hits = r.json().get("hits") or []
+                self._mod_results = hits
+
+                def fill():
+                    self.mod_tree.delete(*self.mod_tree.get_children())
+                    for i, h in enumerate(hits):
+                        name = h.get("title") or h.get("slug") or "?"
+                        dl = h.get("downloads") or 0
+                        vers = ", ".join((h.get("versions") or [])[:3])
+                        self.mod_tree.insert(
+                            "", "end", iid=str(i),
+                            values=(name, f"{dl:,}", vers),
+                        )
+                    if not hits:
+                        self._browser_set_status(
+                            f"Không có mod «{q}» cho MC {self.mc_version} + Fabric")
+                    else:
+                        self._browser_set_status(
+                            f"Tìm thấy {len(hits)} mod (MC {self.mc_version}) · chọn → Tải")
+                self.after(0, fill)
+            except Exception as e:
+                self.after(0, lambda: self._browser_set_status(f"Lỗi tìm: {e}"))
+                write_error_log("Modrinth search", exc=e)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _modrinth_download_selected(self):
+        sel = self.mod_tree.selection()
+        if not sel:
+            self._browser_set_status("Chọn một mod trong danh sách trước")
+            return
+        try:
+            idx = int(sel[0])
+            hit = self._mod_results[idx]
+        except Exception:
+            self._browser_set_status("Không đọc được mod đã chọn")
+            return
+        slug = hit.get("slug") or hit.get("project_id")
+        if not slug:
+            self._browser_set_status("Mod không có slug")
+            return
+        self._browser_set_status(f"Đang tải {slug}…")
+        self.set_status("Tải mod…", "inverse-warning")
+
+        def job():
+            try:
+                ok = self._download_modrinth_mod(slug)
+                if ok:
+                    self.after(0, lambda: self._browser_set_status(
+                        f"✅ Đã tải {slug} cho MC {self.mc_version}"))
+                else:
+                    msg = self.LANG.get(
+                        "no_mod_for_ver",
+                        "Không có bản cho {ver} + Fabric.",
+                    ).format(ver=self.mc_version)
+                    self.after(0, lambda: self._browser_set_status(
+                        f"⚠ {slug}: {msg}"))
+                self.after(0, lambda: self.set_status("Sẵn sàng"))
+                self.after(0, self.refresh_all)
+            except Exception as e:
+                self.after(0, lambda: self._browser_set_status(f"Lỗi tải: {e}"))
+                write_error_log(f"Tải mod browser ({slug})", exc=e)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _browser_go_home(self):
+        url = f"https://modrinth.com/mods?g={self.mc_version}&l=fabric"
+        self._browser_navigate(url, push=True)
+
+    def _browser_go(self):
+        self._browser_navigate(self.browser_url_var.get(), push=True)
+
+    def _browser_navigate(self, url, push=True):
+        url = sanitize_browse_url(url)
+        if is_tracker_url(url):
+            self._browser_set_status("Đã chặn URL tracker")
+            self.log(f"🛡 Browser: chặn tracker {url}")
+            return
+        self.browser_url_var.set(url)
+        if push:
+            if self._browser_hist_i >= 0:
+                self._browser_history = self._browser_history[: self._browser_hist_i + 1]
+            self._browser_history.append(url)
+            self._browser_hist_i = len(self._browser_history) - 1
+
+        host = _host_of(url)
+        self._browser_set_status(f"Đang tải · {host} · anti-tracker")
+        self.set_discord_activity("Đang duyệt mod", host or "Browser")
+
+        if self._html_frame is not None:
+            try:
+                if hasattr(self._html_frame, "load_website"):
+                    self._html_frame.load_website(url)
+                elif hasattr(self._html_frame, "load_url"):
+                    self._html_frame.load_url(url)
+                else:
+                    self._html_frame.load_html(
+                        f'<meta http-equiv="refresh" content="0;url={url}">')
+                self._browser_inject_shield()
+                self._browser_set_status(f"OK · {host} · tracker blocked")
+            except Exception as e:
+                self._browser_set_status(f"Lỗi tải trang: {e}")
+                self.log(f"❌ Browser nhúng: {e}")
+        else:
+            self._browser_set_status(
+                "Không có engine nhúng — bấm «Cửa sổ riêng» hoặc «Cài engine browser»")
+
+    def _browser_inject_shield(self):
+        try:
+            if self._html_frame is None:
+                return
+            for meth in ("run_javascript", "evaluate_js", "execute_script"):
+                if hasattr(self._html_frame, meth):
+                    getattr(self._html_frame, meth)(ANTI_TRACKER_JS)
+                    break
+        except Exception:
+            pass
+
+    def _browser_back(self):
+        if self._browser_hist_i > 0:
+            self._browser_hist_i -= 1
+            self._browser_navigate(self._browser_history[self._browser_hist_i], push=False)
+
+    def _browser_forward(self):
+        if self._browser_hist_i + 1 < len(self._browser_history):
+            self._browser_hist_i += 1
+            self._browser_navigate(self._browser_history[self._browser_hist_i], push=False)
+
+    def _browser_reload(self):
+        if self._browser_hist_i >= 0 and self._browser_history:
+            self._browser_navigate(self._browser_history[self._browser_hist_i], push=False)
+
+    def _browser_open_secure_window(self):
+        global pywebview
+        if pywebview is None:
+            try:
+                import webview as _wv
+                pywebview = _wv
+            except Exception:
+                pywebview = None
+        if pywebview is None:
+            self.log("⚠ Thiếu pywebview — đang cài…")
+            self._browser_reinstall_deps()
+            # fallback: mở trình duyệt hệ thống HTTPS
+            try:
+                webbrowser.open(sanitize_browse_url(self.browser_url_var.get()))
+                self._browser_set_status("Đã mở bằng trình duyệt hệ thống (tạm)")
+            except Exception:
+                pass
+            return
+        url = sanitize_browse_url(self.browser_url_var.get())
+
+        def _runner():
+            try:
+                self.after(0, lambda: self._browser_set_status("Cửa sổ an toàn đang mở…"))
+                window = pywebview.create_window(
+                    "Arch Client Browser", url, width=1100, height=720, text_select=True,
+                )
+
+                def _on_loaded():
+                    try:
+                        window.evaluate_js(ANTI_TRACKER_JS)
+                    except Exception:
+                        pass
+
+                try:
+                    window.events.loaded += _on_loaded
+                except Exception:
+                    pass
+                try:
+                    pywebview.start(private_mode=True)
+                except TypeError:
+                    pywebview.start()
+                self.after(0, lambda: self._browser_set_status("Đã đóng cửa sổ browser"))
+            except Exception as e:
+                self.log(f"❌ Lỗi pywebview: {e}")
+                write_error_log("Browser pywebview", exc=e)
+                try:
+                    webbrowser.open(url)
+                except Exception:
+                    pass
+
+        threading.Thread(target=_runner, daemon=True).start()
+
+    def _browser_reinstall_deps(self):
+        def job():
+            self.log("⏳ Cài gói trình duyệt (tkinterweb, pywebview)…")
+            self.after(0, lambda: self._browser_set_status("Đang cài engine…"))
+            ok = _pip_install(["tkinterweb", "pywebview"])
+            if OS_INFO.get("system") == "Linux":
+                ensure_system_packages(OS_INFO)
+            if ok:
+                self.log("✅ Đã cài gói browser. Bấm «Trang web» hoặc khởi động lại launcher.")
+                self.after(0, lambda: self._browser_set_status("Cài xong — thử tab Trang web"))
+                self.after(0, self._browser_init_engine)
+            else:
+                self.log("⚠ Cài engine chưa đủ — Kho mod vẫn dùng được.")
+                self.after(0, lambda: self._browser_set_status("Cài chưa đủ — dùng Kho mod"))
+        threading.Thread(target=job, daemon=True).start()
+
+    # -------------------------------------------------------------- log tab
     # -------------------------------------------------------------- log tab
     def _build_log_tab(self):
         f = self.tab_log
@@ -1201,8 +2255,37 @@ class App(tb.Window):
             txt.see("end")
         self.after(0, _do)
 
-    def set_status(self, text, style="success-inverse-primary"):
+    def set_status(self, text, style="inverse-success"):
+        self._status_text_base = text
+        self._status_style = style
         self.after(0, lambda: self.status_badge.config(text=f"● {text}", bootstyle=style))
+
+    def _pulse_status_badge(self):
+        """Nhịp status rất nhẹ (chấm ● sáng/tắt) — không đổi màu loạn."""
+        if not getattr(self, "_status_pulse_on", False):
+            return
+        if not hasattr(self, "status_badge"):
+            return
+        try:
+            base = getattr(self, "_status_text_base", self.LANG.get("status_ready", "Ready"))
+            style = getattr(self, "_status_style", "inverse-success")
+            # chỉ pulse khi đang "Sẵn sàng" / Ready — tránh làm phiền lúc đang tải
+            ready_words = (self.LANG.get("status_ready", "Ready"), "Sẵn sàng", "Ready")
+            if base in ready_words:
+                self._pulse_phase = not getattr(self, "_pulse_phase", False)
+                dot = "●" if self._pulse_phase else "○"
+                self.status_badge.config(text=f"{dot} {base}", bootstyle=style)
+            self.after(900, self._pulse_status_badge)
+        except Exception:
+            pass
+
+    def _fade_in_body(self):
+        """Hiện notebook sau 1 nhịp — cảm giác mở launcher mượt hơn (tk không fade alpha dễ)."""
+        try:
+            if hasattr(self, "nb"):
+                self.nb.pack_configure(pady=(8, 4))
+        except Exception:
+            pass
 
     # -------------------------------------------------- Discord Rich Presence
     def _init_discord_rpc(self):
@@ -1244,7 +2327,7 @@ class App(tb.Window):
         try:
             current = self.nb.select()
             label = self._discord_tab_states.get(current, "Đang xem launcher")
-            self.set_discord_activity(label, f"Minecraft {MC_VERSION} · Fabric")
+            self.set_discord_activity(label, f"Minecraft {self.mc_version} · Fabric")
         except Exception:
             pass
 
@@ -1256,6 +2339,78 @@ class App(tb.Window):
                 pass
         self.destroy()
 
+
+    # ------------------------------------------------------- Desktop shortcuts
+    def install_shortcuts_startup(self):
+        """Tự cài shortcut lần đầu (hoặc khi file bị xoá) — không chặn UI."""
+        if not self.cfg.get("auto_install_shortcuts", True):
+            self._refresh_shortcut_status()
+            return
+        if shortcuts_present():
+            self.log("✅ Shortcut desktop / Start Menu đã có sẵn.")
+            self._refresh_shortcut_status()
+            return
+        threading.Thread(target=self._install_shortcuts_job, daemon=True).start()
+
+    def install_shortcuts_thread(self):
+        threading.Thread(target=self._install_shortcuts_job, daemon=True).start()
+
+    def _install_shortcuts_job(self):
+        try:
+            self.set_status("Đang cài shortcut...", "inverse-warning")
+            self.log("⏳ Đang cài shortcut desktop / Start Menu...")
+            result = install_os_shortcuts()
+            for f in result.get("files") or []:
+                self.log(f"  ✅ {f}")
+            self.log("✅ Đã cài shortcut. Mở menu ứng dụng hoặc Start Menu để thấy Arch Client.")
+            self.cfg["auto_install_shortcuts"] = True
+            save_config(self.cfg)
+            self.after(0, self._refresh_shortcut_status)
+            self.set_status("Sẵn sàng")
+        except Exception as e:
+            self.log(f"❌ Lỗi cài shortcut: {e}")
+            log_path = write_error_log("Cài shortcut desktop", exc=e)
+            if log_path:
+                self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
+            self.set_status("Lỗi", "inverse-danger")
+            self.after(0, self._refresh_shortcut_status)
+
+    def remove_shortcuts_thread(self):
+        def job():
+            try:
+                removed = remove_installed_shortcuts()
+                if removed:
+                    for f in removed:
+                        self.log(f"  🗑 Đã gỡ: {f}")
+                    self.log("✅ Đã gỡ shortcut.")
+                else:
+                    self.log("ℹ Không tìm thấy shortcut để gỡ.")
+                self.cfg["auto_install_shortcuts"] = False
+                save_config(self.cfg)
+                self.after(0, self._refresh_shortcut_status)
+            except Exception as e:
+                self.log(f"❌ Lỗi gỡ shortcut: {e}")
+                write_error_log("Gỡ shortcut desktop", exc=e)
+        threading.Thread(target=job, daemon=True).start()
+
+    def _refresh_shortcut_status(self):
+        locs = shortcut_locations()
+        if not hasattr(self, "shortcut_status_lbl"):
+            return
+        if not locs:
+            text = "Hệ điều hành này chưa hỗ trợ tự cài shortcut (chỉ Linux & Windows)."
+            style = "secondary"
+        else:
+            existing = [p for p in locs.values() if Path(p).exists()]
+            if existing:
+                text = "Đã cài: " + "  ·  ".join(existing)
+                style = "success"
+            else:
+                text = ("Chưa cài shortcut. Bấm «Cài shortcut» — hoặc mở lại launcher "
+                        "để tự cài (.desktop trên Linux, .lnk trên Windows).")
+                style = "warning"
+        self.shortcut_status_lbl.config(text=text, bootstyle=style)
+
     # ------------------------------------------------------- Fabric install
     def install_fabric_thread(self):
         if mll is None:
@@ -1265,15 +2420,15 @@ class App(tb.Window):
 
     def _install_fabric(self):
         try:
-            self.set_status("Đang cài Fabric...", "warning-inverse-primary")
+            self.set_status("Đang cài Fabric...", "inverse-warning")
             self.mc_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"⏳ Đang cài Fabric Loader cho Minecraft {MC_VERSION}...")
+            self.log(f"⏳ Đang cài Fabric Loader cho Minecraft {self.mc_version}...")
             callback = {
                 "setStatus": lambda text: self.log(f"  {text}"),
                 "setProgress": lambda value: None,
                 "setMax": lambda value: None,
             }
-            mll.fabric.install_fabric(MC_VERSION, str(self.mc_dir), callback=callback)
+            mll.fabric.install_fabric(self.mc_version, str(self.mc_dir), callback=callback)
             self.log("✅ Cài Fabric thành công!")
             self.set_status("Sẵn sàng")
         except Exception as e:
@@ -1281,7 +2436,7 @@ class App(tb.Window):
             log_path = write_error_log("Cài Fabric", exc=e)
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self.set_status("Lỗi", "danger-inverse-primary")
+            self.set_status("Lỗi", "inverse-danger")
 
     # ------------------------------------------------------- Microsoft auth
     def login_microsoft_thread(self):
@@ -1325,29 +2480,29 @@ class App(tb.Window):
 
     def _launch_game(self):
         try:
-            self.set_status("Đang khởi chạy...", "warning-inverse-primary")
+            self.set_status("Đang khởi chạy...", "inverse-warning")
 
             java_path = self.java_var.get().strip() or "java"
             resolved_java = resolve_java_path(java_path)
             if not resolved_java:
                 self.log(f"❌ Không tìm thấy Java tại '{java_path}'. "
                           "Bấm 'Kiểm tra / Cài Java tự động' trong tab Cài đặt trước.")
-                self.set_status("Thiếu Java", "danger-inverse-primary")
+                self.set_status("Thiếu Java", "inverse-danger")
                 return
             jver = get_java_version(resolved_java)
             if jver and jver < JAVA_MAJOR_REQUIRED:
-                self.log(f"⚠ Java hiện tại là bản {jver}, Minecraft {MC_VERSION} cần Java "
+                self.log(f"⚠ Java hiện tại là bản {jver}, Minecraft {self.mc_version} cần Java "
                           f"{JAVA_MAJOR_REQUIRED}+. Bấm 'Kiểm tra / Cài Java tự động' để cập nhật.")
-                self.set_status("Java quá cũ", "danger-inverse-primary")
+                self.set_status("Java quá cũ", "inverse-danger")
                 return
 
             versions = [
                 v["id"] for v in mll.utils.get_installed_versions(str(self.mc_dir))
-                if v["id"].startswith("fabric-loader") and MC_VERSION in v["id"]
+                if v["id"].startswith("fabric-loader") and self.mc_version in v["id"]
             ]
             if not versions:
                 self.log("⚠ Chưa cài Fabric cho phiên bản này. Bấm 'Cài / Cập nhật Fabric' trước.")
-                self.set_status("Chưa cài Fabric", "danger-inverse-primary")
+                self.set_status("Chưa cài Fabric", "inverse-danger")
                 return
             version_id = versions[0]
             self.log(f"🚀 Chuẩn bị chạy: {version_id}")
@@ -1382,7 +2537,7 @@ class App(tb.Window):
             proc = subprocess.Popen(command, cwd=str(self.mc_dir),
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                       text=True, bufsize=1)
-            self.set_status("Đang chơi", "success-inverse-primary")
+            self.set_status("Đang chơi", "inverse-success")
 
             def stream_output():
                 game_log_lines = []
@@ -1398,7 +2553,7 @@ class App(tb.Window):
                                     "\n".join(game_log_lines[-200:]))
                     if log_path:
                         self.log(f"📝 Chi tiết crash đã ghi vào: {log_path}")
-                    self.set_status("Crash", "danger-inverse-primary")
+                    self.set_status("Crash", "inverse-danger")
                 else:
                     self.log("ℹ Minecraft đã đóng.")
                     self.set_status("Sẵn sàng")
@@ -1408,13 +2563,13 @@ class App(tb.Window):
             self.log(f"❌ Không tìm thấy Java tại '{self.java_var.get() or 'java'}': {e}")
             self.log("   Hãy kiểm tra lại đường dẫn Java trong tab Cài đặt.")
             write_error_log("Khởi chạy game — thiếu Java", exc=e)
-            self.set_status("Lỗi", "danger-inverse-primary")
+            self.set_status("Lỗi", "inverse-danger")
         except Exception as e:
             self.log(f"❌ Lỗi khi khởi chạy: {e}")
             log_path = write_error_log("Khởi chạy game", exc=e)
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self.set_status("Lỗi", "danger-inverse-primary")
+            self.set_status("Lỗi", "inverse-danger")
 
     # -------------------------------------------------------- Optimization
     def apply_optimization_thread(self):
@@ -1434,35 +2589,42 @@ class App(tb.Window):
         self.log(f"✅ Đã cập nhật {opt_path} với thiết lập tối ưu FPS.")
 
     def _download_modrinth_mod(self, slug):
+        """Tải 1 mod từ Modrinth khớp self.mc_version + Fabric. Trả về True/False."""
         if requests is None:
             self.log("⚠ Thiếu 'requests', bỏ qua tải mod tự động.")
-            return
+            return False
         mods_dir = self.mc_dir / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
         if any(slug in fp.name.lower() for fp in mods_dir.glob("*.jar")):
             self.log(f"  ⏭ {slug}: đã có, bỏ qua.")
-            return
+            return True
         try:
             api = (f"https://api.modrinth.com/v2/project/{slug}/version"
-                   f'?loaders=["fabric"]&game_versions=["{MC_VERSION}"]')
+                   f'?loaders=["fabric"]&game_versions=["{self.mc_version}"]')
             r = requests.get(api, timeout=15)
             r.raise_for_status()
             versions = r.json()
             if not versions:
-                self.log(f"  ⚠ {slug}: không có bản cho {MC_VERSION} + Fabric.")
-                return
+                msg = self.LANG.get(
+                    "no_mod_for_ver",
+                    "Không có bản mod cho phiên bản {ver} + Fabric.",
+                ).format(ver=self.mc_version)
+                self.log(f"  ⚠ {slug}: {msg}")
+                return False
             file_info = versions[0]["files"][0]
             dest = mods_dir / file_info["filename"]
-            self.log(f"  ⬇ Đang tải {slug}...")
+            self.log(f"  ⬇ Đang tải {slug} (MC {self.mc_version})...")
             urllib.request.urlretrieve(file_info["url"], dest)
             self.log(f"  ✅ Đã tải: {file_info['filename']}")
+            return True
         except Exception as e:
             self.log(f"  ❌ Lỗi tải {slug}: {e}")
             write_error_log(f"Tải mod Modrinth ({slug})", exc=e)
+            return False
 
     def _apply_optimization(self):
         self.after(0, self.opt_progress.start)
-        self.set_status("Đang tối ưu...", "warning-inverse-primary")
+        self.set_status("Đang tối ưu...", "inverse-warning")
         self.log("🚀 Bắt đầu tối ưu FPS...")
         try:
             self._write_optimized_options()
@@ -1476,7 +2638,7 @@ class App(tb.Window):
             log_path = write_error_log("Tối ưu FPS", exc=e)
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self.set_status("Lỗi", "danger-inverse-primary")
+            self.set_status("Lỗi", "inverse-danger")
         finally:
             # Luôn dừng thanh tiến trình dù thành công hay lỗi, tránh treo UI
             self.after(0, self.opt_progress.stop)
@@ -1484,16 +2646,15 @@ class App(tb.Window):
 
 
 class SplashScreen(tb.Window):
-    """Cửa sổ splash hiển thị khi launcher đang khởi động (dò ngôn ngữ, tải
-    cấu hình...) trước khi cửa sổ chính (App) được mở."""
+    """Splash gọn: logo bo góc + title, không nhồi banner to làm cửa sổ méo."""
 
     def __init__(self):
         super().__init__(themename="flatly")
         self.title("Arch Client")
-        self.overrideredirect(True)  # không viền/thanh tiêu đề
+        self.overrideredirect(True)
         self.attributes("-topmost", True)
 
-        width, height = 420, 260
+        width, height = 380, 240
         self.update_idletasks()
         sw = self.winfo_screenwidth()
         sh = self.winfo_screenheight()
@@ -1502,33 +2663,42 @@ class SplashScreen(tb.Window):
         self.geometry(f"{width}x{height}+{x}+{y}")
         self.resizable(False, False)
 
-        self._icon_full = load_icon_image()
+        self._icon_full = load_icon_image(size=(64, 64), rounded=True)
         if self._icon_full:
-            self.iconphoto(True, self._icon_full)
+            try:
+                self.iconphoto(True, self._icon_full)
+            except Exception:
+                pass
 
-        container = tb.Frame(self, padding=24)
+        outer = tb.Frame(self, bootstyle="primary", padding=0)
+        outer.pack(fill=BOTH, expand=True)
+
+        container = tb.Frame(outer, padding=28)
         container.pack(fill=BOTH, expand=True)
 
-        self._banner_img = load_banner_image(max_width=340)
-        if self._banner_img:
-            tb.Label(container, image=self._banner_img).pack(pady=(10, 15))
-        else:
-            tb.Label(
-                container, text="⚡ Arch Client",
-                font=("Segoe UI", 20, "bold"), bootstyle="primary",
-            ).pack(pady=(20, 15))
+        if self._icon_full:
+            tb.Label(container, image=self._icon_full, bootstyle="inverse-primary").pack(
+                pady=(8, 10))
+        tb.Label(
+            container, text="ARCH CLIENT",
+            font=("Segoe UI", 16, "bold"), bootstyle="inverse-primary",
+        ).pack()
+        tb.Label(
+            container, text="Minecraft · Fabric",
+            font=("Segoe UI", 9), bootstyle="inverse-primary",
+        ).pack(pady=(2, 14))
 
         self.status_var = tk.StringVar(value="")
         tb.Label(
             container, textvariable=self.status_var,
-            font=("Segoe UI", 10), bootstyle="secondary",
-        ).pack(pady=(0, 12))
+            font=("Segoe UI", 9), bootstyle="inverse-primary",
+        ).pack(pady=(0, 10))
 
         self.bar = tb.Progressbar(
-            container, mode="indeterminate", bootstyle="info-striped",
+            container, mode="indeterminate", bootstyle="secondary-striped", length=280,
         )
-        self.bar.pack(fill=X, padx=10)
-        self.bar.start(12)
+        self.bar.pack(pady=(0, 6))
+        self.bar.start(14)
 
     def set_status(self, text):
         self.status_var.set(text)
@@ -1539,8 +2709,9 @@ def run_with_splash():
 
     def worker():
         splash.after(0, lambda: splash.set_status(LANG_STRINGS["vi"]["splash_detect"]))
-        lang = detect_language()
-        strings = LANG_STRINGS[lang]
+        cfg = load_config()
+        lang = resolve_language(cfg.get("lang", "auto"))
+        strings = LANG_STRINGS.get(lang, LANG_STRINGS["en"])
         splash.after(0, lambda: splash.set_status(strings["splash_load"]))
         time.sleep(0.3)
         splash.after(0, lambda: finish(lang))
