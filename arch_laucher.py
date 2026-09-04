@@ -1,123 +1,51 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-# Arch Client - launcher Minecraft Fabric (ttkbootstrap, theme flatly)
-# Tự nhận diện OS + cài gói thiếu, tự tạo .minecraft, log lỗi ra file txt.
-#
-# Cài thủ công nếu cần:
-#   pip install minecraft-launcher-lib requests ttkbootstrap --break-system-packages
+"""
+Fabric Launcher Pro - CachyOS / KDE Plasma
+============================================
+Launcher Minecraft Fabric gọn nhẹ, giao diện đẹp (ttkbootstrap, dark theme),
+tối ưu FPS, đọc trực tiếp mods/resourcepacks/schematics/shaderpacks từ .minecraft.
+
+Tự động nhận diện hệ điều hành (Windows 10/11, Ubuntu, Debian, Arch, các distro
+dựa trên Arch/Debian) và tự cài các gói còn thiếu, đồng thời tự khởi tạo thư mục
+.minecraft nếu chưa tồn tại.
+
+Cài đặt thủ công (nếu cần):
+    pip install minecraft-launcher-lib requests ttkbootstrap --break-system-packages
+
+Chạy:
+    python3 fabric_launcher_pro.py
+"""
 
 import os
-import re
 import sys
 import json
-import time
 import shutil
-import tarfile
-import zipfile
 import platform
 import threading
-import traceback
 import importlib
 import subprocess
 import urllib.request
 import webbrowser
+import traceback
+import datetime
 from pathlib import Path
-from datetime import datetime
 
 # ==========================================================================
 # BOOTSTRAP: nhận diện hệ điều hành + tự cài gói còn thiếu
 # ==========================================================================
 
 REQUIRED_PIP_PACKAGES = {
-    # tên module python -> tên gói pip (bắt buộc — thiếu thì launcher không chạy được)
+    # tên module python -> tên gói pip
     "ttkbootstrap": "ttkbootstrap",
     "minecraft_launcher_lib": "minecraft-launcher-lib",
     "requests": "requests",
     "PIL": "pillow",
 }
 
-OPTIONAL_PIP_PACKAGES = {
-    # tính năng phụ (Discord Rich Presence) — thiếu vẫn chạy launcher bình thường
-    "pypresence": "pypresence",
-}
-
 
 def _bprint(msg):
     print(msg, flush=True)
-
-
-# ==========================================================================
-# GHI LOG LỖI RA FILE .txt (mọi lỗi trong launcher đều được lưu lại)
-# ==========================================================================
-
-ERROR_LOG_DIR = Path.home() / ".config" / "arch-client-launcher" / "error_logs"
-
-
-def write_error_log(context, exc=None, extra_text=None):
-    """Ghi lỗi ra file .txt kèm timestamp + traceback đầy đủ.
-
-    context: mô tả ngắn nơi xảy ra lỗi (vd 'Cài Fabric', 'Khởi chạy game')
-    exc: exception object (nếu có) — nếu None sẽ tự lấy traceback hiện tại
-    extra_text: text bổ sung muốn ghi kèm (không bắt buộc)
-    Trả về đường dẫn file log đã ghi, hoặc None nếu ghi thất bại.
-    """
-    try:
-        ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_ctx = "".join(c if c.isalnum() else "_" for c in context)[:40] or "loi"
-        log_path = ERROR_LOG_DIR / f"error_{ts}_{safe_ctx}.txt"
-
-        tb_text = traceback.format_exc()
-        if tb_text.strip() == "NoneType: None":
-            tb_text = "(không có traceback — lỗi được báo cáo thủ công)"
-
-        lines = [
-            "=" * 70,
-            "ARCH CLIENT — BÁO CÁO LỖI",
-            "=" * 70,
-            f"Thời gian     : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-            f"Ngữ cảnh      : {context}",
-            f"Hệ điều hành  : {OS_INFO['pretty'] if 'OS_INFO' in globals() else platform.platform()}",
-            f"Python        : {sys.version.split()[0]}",
-        ]
-        if exc is not None:
-            lines.append(f"Loại lỗi      : {type(exc).__name__}")
-            lines.append(f"Nội dung      : {exc}")
-        if extra_text:
-            lines.append("-" * 70)
-            lines.append(str(extra_text))
-        lines.append("-" * 70)
-        lines.append("Traceback đầy đủ:")
-        lines.append(tb_text)
-        lines.append("=" * 70)
-
-        log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        _bprint(f"📝 Đã ghi file lỗi: {log_path}")
-        return log_path
-    except Exception as log_err:
-        # Ghi log lỗi thất bại thì cũng không được làm crash thêm launcher
-        _bprint(f"⚠ Không thể ghi file lỗi: {log_err}")
-        return None
-
-
-def _thread_excepthook(args):
-    """Bắt mọi lỗi chưa được xử lý xảy ra trong các thread nền (vd cài Fabric,
-    tải mod, khởi chạy game) và ghi lại thành file .txt thay vì làm treo im lặng."""
-    context = f"Thread nền: {args.thread.name if args.thread else 'unknown'}"
-    write_error_log(context, exc=args.exc_value)
-
-
-def _main_excepthook(exc_type, exc_value, exc_tb):
-    """Bắt mọi lỗi chưa được xử lý ở luồng chính (GUI) và ghi lại thành file .txt."""
-    write_error_log("Luồng chính (GUI)", exc=exc_value)
-    traceback.print_exception(exc_type, exc_value, exc_tb)
-
-
-sys.excepthook = _main_excepthook
-try:
-    threading.excepthook = _thread_excepthook
-except AttributeError:
-    pass  # Python < 3.8 không có threading.excepthook
 
 
 def detect_os():
@@ -242,35 +170,17 @@ def ensure_python_packages():
             importlib.import_module(mod_name)
         except ImportError:
             missing.append(pip_name)
-    if missing:
-        _bprint(f"⏳ Thiếu thư viện Python: {', '.join(missing)} — đang tự động cài đặt qua pip...")
-        ok = _pip_install(missing)
-        if ok:
-            _bprint("✅ Đã cài xong thư viện Python.")
-            importlib.invalidate_caches()
-        else:
-            _bprint("❌ Cài tự động thất bại. Hãy cài thủ công bằng lệnh:")
-            _bprint(f"   {sys.executable} -m pip install {' '.join(missing)} --break-system-packages")
-            write_error_log("Bootstrap — cài thư viện Python thất bại",
-                             extra_text=f"Các gói còn thiếu: {', '.join(missing)}")
-            sys.exit(1)
-
-    # Gói phụ (Discord Rich Presence...) — cố gắng cài nhưng KHÔNG chặn launcher
-    # nếu thất bại (không có mạng, v.v.) vì đây chỉ là tính năng cộng thêm.
-    opt_missing = []
-    for mod_name, pip_name in OPTIONAL_PIP_PACKAGES.items():
-        try:
-            importlib.import_module(mod_name)
-        except ImportError:
-            opt_missing.append(pip_name)
-    if opt_missing:
-        _bprint(f"⏳ Thư viện phụ còn thiếu: {', '.join(opt_missing)} — thử cài (không bắt buộc)...")
-        if _pip_install(opt_missing):
-            _bprint("✅ Đã cài xong thư viện phụ.")
-            importlib.invalidate_caches()
-        else:
-            _bprint("ℹ Không cài được thư viện phụ — Discord Rich Presence sẽ bị tắt, "
-                     "launcher vẫn chạy bình thường.")
+    if not missing:
+        return
+    _bprint(f"⏳ Thiếu thư viện Python: {', '.join(missing)} — đang tự động cài đặt qua pip...")
+    ok = _pip_install(missing)
+    if ok:
+        _bprint("✅ Đã cài xong thư viện Python.")
+        importlib.invalidate_caches()
+    else:
+        _bprint("❌ Cài tự động thất bại. Hãy cài thủ công bằng lệnh:")
+        _bprint(f"   {sys.executable} -m pip install {' '.join(missing)} --break-system-packages")
+        sys.exit(1)
 
 
 def bootstrap_environment():
@@ -287,17 +197,6 @@ OS_INFO = bootstrap_environment()
 
 import tkinter as tk
 from tkinter import filedialog
-
-
-def _tk_report_callback_exception(self, exc_type, exc_value, exc_tb):
-    """Mọi lỗi xảy ra bên trong các callback của Tkinter (nút bấm, sự kiện,
-    .after(...)) đều đi qua đây thay vì sys.excepthook — ghi lại thành .txt
-    để launcher không bao giờ 'lặng lẽ' bỏ qua lỗi."""
-    write_error_log("Callback giao diện (Tkinter)", exc=exc_value)
-    traceback.print_exception(exc_type, exc_value, exc_tb)
-
-
-tk.Tk.report_callback_exception = _tk_report_callback_exception
 
 try:
     import ttkbootstrap as tb
@@ -326,13 +225,6 @@ try:
     from PIL import Image, ImageTk
 except ImportError:
     Image = ImageTk = None
-
-try:
-    from pypresence import Presence as DiscordPresence
-except ImportError:
-    DiscordPresence = None
-
-DISCORD_CLIENT_ID = "1545310964331843584"
 
 APP_DIR = Path(__file__).resolve().parent
 ICON_PATH = APP_DIR / "img" / "icon.png"
@@ -381,14 +273,14 @@ LANG_STRINGS = {
         "tab_overview": "  📊 Tổng quan  ",
         "tab_settings": "  ⚙️ Cài đặt  ",
         "tab_optimize": "  🚀 Tối ưu FPS  ",
-        "tab_log": "  🖥️ Console  ",
+        "tab_console": "  💻 Console  ",
+        "tab_log": "  📜 Log  ",
         "mc_dir_label": "Thư mục .minecraft:",
         "btn_choose": "Chọn...",
         "btn_install_fabric": "⬇ Cài / Cập nhật Fabric",
         "btn_play": "▶  CHƠI NGAY",
         "btn_website": "🌐 Website",
-        "btn_clear_console": "🗑 Xoá console",
-        "btn_save_console": "💾 Lưu log ra .txt",
+        "btn_shortcut": "📌 Tạo shortcut Desktop",
         "splash_detect": "Đang xác định vị trí & ngôn ngữ...",
         "splash_load": "Đang tải cấu hình...",
     },
@@ -398,14 +290,14 @@ LANG_STRINGS = {
         "tab_overview": "  📊 Overview  ",
         "tab_settings": "  ⚙️ Settings  ",
         "tab_optimize": "  🚀 FPS Optimize  ",
-        "tab_log": "  🖥️ Console  ",
+        "tab_console": "  💻 Console  ",
+        "tab_log": "  📜 Log  ",
         "mc_dir_label": ".minecraft folder:",
         "btn_choose": "Browse...",
         "btn_install_fabric": "⬇ Install / Update Fabric",
-        "btn_clear_console": "🗑 Clear console",
-        "btn_save_console": "💾 Save log as .txt",
         "btn_play": "▶  PLAY",
         "btn_website": "🌐 Website",
+        "btn_shortcut": "📌 Create Desktop shortcut",
         "splash_detect": "Detecting location & language...",
         "splash_load": "Loading configuration...",
     },
@@ -441,22 +333,130 @@ MC_VERSION = "1.21.11"
 DEFAULT_MC_DIR = Path.home() / ".minecraft"
 CONFIG_DIR = Path.home() / ".config" / "arch-client-launcher"
 CONFIG_FILE = CONFIG_DIR / "config.json"
+ERROR_LOG_DIR = CONFIG_DIR / "error_logs"
 
-# Minecraft 1.20.5+ (bao gồm 1.21.x) yêu cầu tối thiểu Java 21 để chạy.
-JAVA_MAJOR_REQUIRED = 21
-JRE_DIR = CONFIG_DIR / "jre"
+
+def write_error_log(context, exc):
+    """Ghi traceback đầy đủ ra file .txt trong ~/.config/arch-client-launcher/error_logs/.
+    Trả về đường dẫn file đã ghi (hoặc None nếu ghi thất bại)."""
+    try:
+        ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        fp = ERROR_LOG_DIR / f"error_{ts}.txt"
+        content = (
+            f"Arch Client Launcher — Error Log\n"
+            f"Thời gian: {datetime.datetime.now().isoformat()}\n"
+            f"Ngữ cảnh: {context}\n"
+            f"{'-' * 60}\n"
+            f"{traceback.format_exc()}\n"
+        )
+        fp.write_text(content, encoding="utf-8")
+        return fp
+    except Exception:
+        return None
+
+
+def create_desktop_shortcut(log_func=_bprint):
+    """Tự tạo shortcut khởi động nhanh, hỗ trợ cả 3 hệ điều hành:
+    Linux -> file .desktop (menu ứng dụng + Desktop),
+    Windows -> file .lnk trên Desktop (qua PowerShell/WScript.Shell),
+    macOS -> file .command trên Desktop.
+    """
+    system = platform.system()
+    script_path = str(APP_DIR / Path(__file__).name)
+    workdir = str(APP_DIR)
+    try:
+        if system == "Linux":
+            apps_dir = Path.home() / ".local" / "share" / "applications"
+            apps_dir.mkdir(parents=True, exist_ok=True)
+            desktop_file = apps_dir / "arch-client-launcher.desktop"
+            icon_line = f"Icon={ICON_PATH}" if ICON_PATH.exists() else "Icon=applications-games"
+            content = (
+                "[Desktop Entry]\n"
+                "Type=Application\n"
+                "Name=Arch Client Launcher\n"
+                "Comment=Launcher Minecraft Fabric toi uu FPS\n"
+                f'Exec="{sys.executable}" "{script_path}"\n'
+                f"{icon_line}\n"
+                "Terminal=false\n"
+                "Categories=Game;\n"
+                "StartupWMClass=ArchClientLauncher\n"
+            )
+            desktop_file.write_text(content, encoding="utf-8")
+            os.chmod(desktop_file, 0o755)
+            log_func(f"✅ Đã tạo shortcut ứng dụng: {desktop_file}")
+
+            desk = Path.home() / "Desktop"
+            if desk.exists():
+                desk_file = desk / "arch-client-launcher.desktop"
+                shutil.copy(desktop_file, desk_file)
+                os.chmod(desk_file, 0o755)
+                try:
+                    subprocess.run(["gio", "set", str(desk_file), "metadata::trusted", "true"],
+                                    check=False, capture_output=True)
+                except Exception:
+                    pass
+                log_func(f"✅ Đã tạo shortcut trên Desktop: {desk_file}")
+            return True
+
+        elif system == "Windows":
+            desk = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
+            desk.mkdir(parents=True, exist_ok=True)
+            shortcut_path = desk / "Arch Client Launcher.lnk"
+
+            ico_path = APP_DIR / "img" / "icon.ico"
+            if Image is not None and ICON_PATH.exists() and not ico_path.exists():
+                try:
+                    img = Image.open(ICON_PATH).convert("RGBA")
+                    img.save(ico_path, format="ICO",
+                              sizes=[(16, 16), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)])
+                except Exception:
+                    ico_path = None
+
+            pyw = Path(sys.executable).with_name("pythonw.exe")
+            python_exec = str(pyw) if pyw.exists() else sys.executable
+            icon_target = str(ico_path) if ico_path and Path(ico_path).exists() else python_exec
+
+            ps_script = (
+                '$WshShell = New-Object -ComObject WScript.Shell\n'
+                f'$Shortcut = $WshShell.CreateShortcut("{shortcut_path}")\n'
+                f'$Shortcut.TargetPath = "{python_exec}"\n'
+                f'$Shortcut.Arguments = \'"{script_path}"\'\n'
+                f'$Shortcut.WorkingDirectory = "{workdir}"\n'
+                f'$Shortcut.IconLocation = "{icon_target}"\n'
+                '$Shortcut.Save()\n'
+            )
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_script],
+                            check=True, capture_output=True)
+            log_func(f"✅ Đã tạo shortcut trên Desktop: {shortcut_path}")
+            return True
+
+        elif system == "Darwin":
+            desk = Path.home() / "Desktop"
+            desk.mkdir(parents=True, exist_ok=True)
+            cmd_path = desk / "Arch Client Launcher.command"
+            content = f'#!/bin/bash\ncd "{workdir}"\n"{sys.executable}" "{script_path}"\n'
+            cmd_path.write_text(content, encoding="utf-8")
+            os.chmod(cmd_path, 0o755)
+            log_func(f"✅ Đã tạo shortcut trên Desktop: {cmd_path}")
+            return True
+
+        else:
+            log_func("⚠ Không nhận diện được hệ điều hành để tạo shortcut.")
+            return False
+    except Exception as e:
+        write_error_log("Tạo desktop shortcut", e)
+        log_func(f"❌ Lỗi khi tạo shortcut: {e}")
+        return False
 
 OPTIMIZATION_MODS = {
-    "sodium":            "Render engine siêu nhanh — bắt buộc cho FPS cao",
-    "lithium":           "Tối ưu logic game, giảm tick lag",
-    "starlight":         "Tối ưu ánh sáng, giảm lag chunk",
-    "ferrite-core":       "Giảm RAM sử dụng",
-    "krypton":           "Tối ưu mạng, giảm lag khi chơi server",
-    "lazydfu":           "Giảm thời gian khởi động game",
-    "iris":              "Hỗ trợ shader, tương thích Sodium",
-    "modernfix":         "Giảm RAM + tăng tốc thời gian khởi động",
-    "entityculling":     "Bỏ qua render entity ngoài tầm nhìn — tăng FPS mạnh",
-    "immediatelyfast":   "Tối ưu vẽ UI/immediate rendering, tăng FPS thêm",
+    "sodium":       "Render engine siêu nhanh — bắt buộc cho FPS cao",
+    "lithium":      "Tối ưu logic game, giảm tick lag",
+    "starlight":    "Tối ưu ánh sáng, giảm lag chunk",
+    "ferrite-core": "Giảm RAM sử dụng",
+    "krypton":      "Tối ưu mạng, giảm lag khi chơi server",
+    "lazydfu":      "Giảm thời gian khởi động game",
+    "iris":         "Hỗ trợ shader, tương thích Sodium",
 }
 
 OPTIMIZED_OPTIONS = {
@@ -474,11 +474,10 @@ CATEGORIES = [
 ]
 
 
-
 def default_config():
     return {
         "mc_dir": str(DEFAULT_MC_DIR), "java_path": "java", "ram_mb": 3072,
-        "username": "Player", "azure_client_id": "",
+        "username": "Player", "azure_client_id": "", "shortcut_created": False,
     }
 
 
@@ -499,197 +498,75 @@ def save_config(cfg):
     CONFIG_FILE.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-REQUIRED_MC_SUBDIRS = [
-    "mods", "resourcepacks", "shaderpacks", "schematics",
-    "saves", "screenshots", "config", "logs", "crash-reports", "versions",
-]
+def ensure_minecraft_dir(mc_dir: Path) -> bool:
+    """Tự động khởi tạo cấu trúc thư mục .minecraft cơ bản nếu chưa tồn tại.
 
-
-def ensure_minecraft_dir(mc_dir: Path) -> dict:
-    """Tự động nhận diện & khởi tạo cấu trúc thư mục .minecraft.
-
-    - Nếu thư mục .minecraft chưa hề tồn tại: tự tạo TẤT CẢ các thư mục con cần thiết.
-    - Nếu đã tồn tại nhưng thiếu một vài thư mục con (vd người dùng mới cài lại
-      game, hoặc thư mục bị xoá nhầm): chỉ tạo bù đúng những cái đang thiếu.
-
-    Trả về dict:
-        {"first_time": bool, "created": [tên các thư mục con vừa được tạo]}
+    Trả về True nếu thư mục .minecraft là mới được tạo (lần đầu chạy).
     """
     first_time = not mc_dir.exists()
     mc_dir.mkdir(parents=True, exist_ok=True)
-
-    created = []
-    for d in REQUIRED_MC_SUBDIRS:
-        sub = mc_dir / d
-        if not sub.exists():
-            sub.mkdir(parents=True, exist_ok=True)
-            created.append(d)
-
-    # options.txt không bắt buộc nhưng nếu thiếu hoàn toàn (máy mới),
-    # ghi sẵn 1 file rỗng để game không lỗi khi đọc lần đầu.
-    opt_path = mc_dir / "options.txt"
-    if first_time and not opt_path.exists():
-        try:
-            opt_path.write_text("", encoding="utf-8")
-        except Exception:
-            pass
-
-    return {"first_time": first_time, "created": created}
+    subdirs = [
+        "mods", "resourcepacks", "shaderpacks", "schematics",
+        "saves", "screenshots", "config", "logs", "crash-reports",
+    ]
+    for d in subdirs:
+        (mc_dir / d).mkdir(parents=True, exist_ok=True)
+    return first_time
 
 
-# ==========================================================================
-# JAVA (OpenJDK): tự nhận diện thiếu Java trên mọi OS và tự động cài
-# ==========================================================================
-
-def find_bundled_java() -> "Path | None":
-    """Tìm file java đã được launcher tự tải & giải nén trước đó (nếu có)."""
-    if not JRE_DIR.exists():
-        return None
-    exe_name = "java.exe" if platform.system() == "Windows" else "java"
-    matches = [p for p in JRE_DIR.rglob(exe_name) if p.parent.name == "bin"]
-    if not matches:
-        return None
-    matches.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return matches[0]
+def _snapshot_mc_files(mc_dir: Path):
+    """Trả về tập hợp đường dẫn tương đối các file trong versions/libraries/assets,
+    dùng để so sánh trước/sau khi tải nhằm biết đã bù được bao nhiêu file còn thiếu."""
+    snap = set()
+    for sub in ("versions", "libraries", "assets"):
+        p = mc_dir / sub
+        if p.exists():
+            for fp in p.rglob("*"):
+                if fp.is_file():
+                    snap.add(str(fp.relative_to(mc_dir)))
+    return snap
 
 
-def get_java_version(java_exe) -> "int | None":
-    """Chạy `java -version` và trả về số phiên bản chính (vd 21), None nếu lỗi."""
-    try:
-        result = subprocess.run([str(java_exe), "-version"], capture_output=True,
-                                  text=True, timeout=10)
-        output = (result.stdout or "") + (result.stderr or "")
-        m = re.search(r'version\s+"(\d+)', output)
-        if not m:
-            m = re.search(r'(\d+)\.\d+\.\d+', output)
-        return int(m.group(1)) if m else None
-    except Exception:
-        return None
-
-
-def resolve_java_path(configured: str) -> "str | None":
-    """Quy đổi giá trị người dùng nhập (đường dẫn tuyệt đối hoặc chỉ 'java')
-    thành đường dẫn thực thi được, hoặc None nếu không tìm thấy."""
-    configured = (configured or "").strip() or "java"
-    if os.path.isabs(configured) and Path(configured).exists():
-        return configured
-    found = shutil.which(configured)
-    return found
-
-
-def adoptium_download_info(java_major=JAVA_MAJOR_REQUIRED):
-    """Trả về (url, ext) cho bản OpenJDK (Eclipse Temurin) phù hợp OS/kiến trúc
-    hiện tại, hoặc (None, None) nếu OS không được hỗ trợ tự động cài."""
-    system = platform.system()
-    machine = platform.machine().lower()
-
-    if system == "Windows":
-        os_name, ext = "windows", "zip"
-    elif system == "Linux":
-        os_name, ext = "linux", "tar.gz"
-    else:
-        return None, None
-
-    if machine in ("amd64", "x86_64"):
-        arch = "x64"
-    elif machine in ("arm64", "aarch64"):
-        arch = "aarch64"
-    else:
-        return None, None
-
-    url = (f"https://api.adoptium.net/v3/binary/latest/{java_major}/ga/"
-           f"{os_name}/{arch}/jdk/hotspot/normal/eclipse?project=jdk")
-    return url, ext
-
-
-def download_file(url, dest_path: Path, log_fn=_bprint):
-    """Tải file với log tiến độ theo mốc 10%. Ném exception nếu lỗi mạng."""
-    with requests.get(url, stream=True, timeout=60, allow_redirects=True) as r:
-        r.raise_for_status()
-        total = int(r.headers.get("content-length") or 0)
-        downloaded = 0
-        last_pct = -100
-        with open(dest_path, "wb") as f:
-            for chunk in r.iter_content(chunk_size=262144):
-                if not chunk:
-                    continue
-                f.write(chunk)
-                downloaded += len(chunk)
-                if total:
-                    pct = int(downloaded * 100 / total)
-                    if pct - last_pct >= 10:
-                        mb_done = downloaded // (1024 * 1024)
-                        mb_total = total // (1024 * 1024)
-                        log_fn(f"  ⬇ {pct}% ({mb_done}MB / {mb_total}MB)")
-                        last_pct = pct
-    return dest_path
-
-
-def extract_archive(archive_path: Path, dest_dir: Path, ext: str):
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    if ext == "zip":
-        with zipfile.ZipFile(archive_path) as z:
-            z.extractall(dest_dir)
-    else:
-        with tarfile.open(archive_path) as t:
-            t.extractall(dest_dir)
-
-
-def install_java_via_pkg_manager(osinfo, java_major=JAVA_MAJOR_REQUIRED) -> bool:
-    """Thử cài OpenJDK qua trình quản lý gói của distro Linux trước (nhanh
-    hơn và tích hợp hệ thống tốt hơn bản tải rời). Trả về True nếu có vẻ
-    thành công (không đảm bảo đúng version — hàm gọi sẽ tự kiểm tra lại)."""
-    pm = osinfo.get("pkg_manager")
-    if pm == "pacman":
-        return _run(["pacman", "-Sy", "--needed", "--noconfirm", "jdk-openjdk"], use_sudo=True)
-    elif pm == "apt":
-        _run(["apt-get", "update"], use_sudo=True)
-        ok = _run(["apt-get", "install", "-y", f"openjdk-{java_major}-jdk"], use_sudo=True)
-        if not ok:
-            ok = _run(["apt-get", "install", "-y", "default-jdk"], use_sudo=True)
-        return ok
-    return False
-
-
-
+# --------------------------------------------------------------------------
+class SplashScreen(tb.Window):
     """Màn hình chờ khi khởi động, giống launcher thương mại thật."""
 
     def __init__(self):
-        super().__init__(themename="flatly")
+        super().__init__(themename="cosmo")
         self.overrideredirect(True)
         w, h = 460, 380
         self.update_idletasks()
         x = (self.winfo_screenwidth() - w) // 2
         y = (self.winfo_screenheight() - h) // 2
         self.geometry(f"{w}x{h}+{x}+{y}")
-        self.configure(bg="#2f7cf6")
+        self.configure(bg="#ffffff")
 
         self._icon_full = load_icon_image()
         if self._icon_full:
             self.iconphoto(True, self._icon_full)
 
-        outer = tb.Frame(self, bootstyle="primary")
+        outer = tb.Frame(self, bootstyle="light")
         outer.pack(fill="both", expand=True)
 
         self._logo_img = load_icon_image(size=(72, 72))
         if self._logo_img:
-            tb.Label(outer, image=self._logo_img, bootstyle="inverse-primary").pack(pady=(24, 0))
+            tb.Label(outer, image=self._logo_img, bootstyle="inverse-light").pack(pady=(24, 0))
         else:
-            tb.Label(outer, text="⚡", font=("", 40), bootstyle="inverse-primary").pack(pady=(24, 0))
-        tb.Label(outer, text="ARCH CLIENT", font=("", 16, "bold"),
-                  bootstyle="inverse-primary").pack(pady=(4, 2))
+            tb.Label(outer, text="⚡", font=("", 40), bootstyle="primary-inverse-light").pack(pady=(24, 0))
+        tb.Label(outer, text="ARCH CLIENT LAUNCHER", font=("", 16, "bold"),
+                  bootstyle="primary-inverse-light").pack(pady=(4, 2))
         tb.Label(outer, text=f"Minecraft {MC_VERSION} · Fabric", font=("", 9),
-                  bootstyle="inverse-primary").pack()
+                  bootstyle="secondary-inverse-light").pack()
 
         self._banner_img = load_banner_image(max_width=340)
         if self._banner_img:
-            tb.Label(outer, image=self._banner_img, bootstyle="inverse-primary").pack(pady=(10, 0))
+            tb.Label(outer, image=self._banner_img, bootstyle="inverse-light").pack(pady=(10, 0))
 
         self.status_lbl = tb.Label(outer, text="Đang khởi động...", font=("", 9),
-                                     bootstyle="secondary-inverse-primary")
+                                     bootstyle="secondary-inverse-light")
         self.status_lbl.pack(pady=(16, 6))
 
-        self.bar = tb.Progressbar(outer, bootstyle="success-striped",
+        self.bar = tb.Progressbar(outer, bootstyle="info-striped",
                                     mode="indeterminate", length=340)
         self.bar.pack(pady=(0, 16))
         self.bar.start(12)
@@ -701,10 +578,10 @@ def install_java_via_pkg_manager(osinfo, java_major=JAVA_MAJOR_REQUIRED) -> bool
 
 class App(tb.Window):
     def __init__(self, lang="vi"):
-        super().__init__(themename="flatly")
+        super().__init__(themename="cosmo")
         self.lang = lang
         self.LANG = LANG_STRINGS[lang]
-        self.title("⚡ Arch Client — Minecraft " + MC_VERSION)
+        self.title("⚡ Arch Client Launcher — Minecraft " + MC_VERSION)
         self.geometry("880x640")
         self.minsize(760, 560)
 
@@ -716,40 +593,27 @@ class App(tb.Window):
         self.mc_dir = Path(self.cfg["mc_dir"])
         self.access_token = None
         self.uuid = None
+        self.game_proc = None
 
-        self.discord_rpc = None
-        self.discord_start_time = int(time.time())
+        mc_dir_created = ensure_minecraft_dir(self.mc_dir)
 
-        mc_dir_result = ensure_minecraft_dir(self.mc_dir)
+        if not self.cfg.get("shortcut_created"):
+            threading.Thread(target=self._first_run_create_shortcut, daemon=True).start()
 
         self._build_header()
-        self._build_footer()
         self._build_body()
-
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._build_footer()
 
         self.refresh_all()
 
         self.log(f"🖥 Hệ điều hành: {OS_INFO['pretty']}")
-        if mc_dir_result["first_time"]:
-            self.log(f"📁 Chưa có .minecraft — đã tự động tạo mới hoàn toàn tại: {self.mc_dir}")
-            self.log(f"   (đã tạo {len(mc_dir_result['created'])} thư mục con: "
-                      f"{', '.join(mc_dir_result['created'])})")
-        elif mc_dir_result["created"]:
-            self.log(f"🔍 Đã nhận diện .minecraft có sẵn nhưng thiếu thư mục con — đã tạo bù: "
-                      f"{', '.join(mc_dir_result['created'])}")
-        else:
-            self.log("✅ Cấu trúc thư mục .minecraft đầy đủ, không thiếu gì.")
+        if mc_dir_created:
+            self.log(f"📁 Chưa có .minecraft — đã tự động tạo tại: {self.mc_dir}")
+            self.log("   (kèm các thư mục con: mods, resourcepacks, shaderpacks, schematics, saves, ...)")
         if mll is None:
             self.log("⚠ Thiếu 'minecraft-launcher-lib' — pip install minecraft-launcher-lib --break-system-packages")
         if requests is None:
             self.log("⚠ Thiếu 'requests' — pip install requests --break-system-packages")
-
-        # Tự động kiểm tra & cài Java nếu thiếu/quá cũ — chạy nền, không chặn UI.
-        self.after(200, self.check_java_startup)
-
-        # Discord Rich Presence — hiện đang làm gì / tải gì ngay trên Discord.
-        self.after(300, self._init_discord_rpc)
 
     # ---------------------------------------------------------------- header
     def _build_header(self):
@@ -764,10 +628,10 @@ class App(tb.Window):
         if self._header_logo:
             tb.Label(title_row, image=self._header_logo, bootstyle="inverse-primary").pack(
                 side="left", padx=(0, 8))
-            tb.Label(title_row, text="ARCH CLIENT", font=("", 20, "bold"),
+            tb.Label(title_row, text="ARCH CLIENT LAUNCHER", font=("", 20, "bold"),
                       bootstyle="inverse-primary").pack(side="left")
         else:
-            tb.Label(title_row, text="⚡ ARCH CLIENT", font=("", 20, "bold"),
+            tb.Label(title_row, text="⚡ ARCH CLIENT LAUNCHER", font=("", 20, "bold"),
                       bootstyle="inverse-primary").pack(side="left")
         tb.Label(left, text=self.LANG["app_subtitle"].format(ver=MC_VERSION),
                   font=("", 10), bootstyle="inverse-primary").pack(anchor="w")
@@ -787,41 +651,31 @@ class App(tb.Window):
         self.tab_overview = tb.Frame(self.nb, padding=14)
         self.tab_settings = tb.Frame(self.nb, padding=14)
         self.tab_optimize = tb.Frame(self.nb, padding=14)
+        self.tab_console = tb.Frame(self.nb, padding=10)
         self.tab_log = tb.Frame(self.nb, padding=10)
 
         self.nb.add(self.tab_overview, text=self.LANG["tab_overview"])
         self.nb.add(self.tab_settings, text=self.LANG["tab_settings"])
         self.nb.add(self.tab_optimize, text=self.LANG["tab_optimize"])
+        self.nb.add(self.tab_console, text=self.LANG["tab_console"])
         self.nb.add(self.tab_log, text=self.LANG["tab_log"])
 
         self._build_overview_tab()
         self._build_settings_tab()
         self._build_optimize_tab()
+        self._build_console_tab()
         self._build_log_tab()
-
-        self._discord_tab_states = {
-            str(self.tab_overview): "Đang xem: Tổng quan",
-            str(self.tab_settings): "Đang xem: Cài đặt",
-            str(self.tab_optimize): "Đang xem: Tối ưu FPS",
-            str(self.tab_log): "Đang xem: Console",
-        }
-        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
 
     # --------------------------------------------------------------- footer
     def _build_footer(self):
-        bar = tb.Frame(self, padding=(14, 10))
-        bar.pack(side="bottom", fill="x")
+        bar = tb.Frame(self, padding=(14, 8))
+        bar.pack(fill="x")
 
-        tb.Separator(self, bootstyle="secondary").pack(side="bottom", fill="x")
+        tb.Button(bar, text=self.LANG["btn_install_fabric"], bootstyle="info-outline",
+                   command=self.install_fabric_thread).pack(side="left")
 
-        left = tb.Frame(bar)
-        left.pack(side="left")
-
-        tb.Button(left, text=self.LANG["btn_install_fabric"], bootstyle="info-outline",
-                   command=self.install_fabric_thread).pack(side="left", ipady=4)
-
-        tb.Button(left, text=self.LANG["btn_website"], bootstyle="primary-outline",
-                   command=self.open_website).pack(side="left", padx=(10, 0), ipady=4)
+        tb.Button(bar, text=self.LANG["btn_website"], bootstyle="link",
+                   command=self.open_website).pack(side="left", padx=(10, 0))
 
         self.play_btn = tb.Button(bar, text=self.LANG["btn_play"], bootstyle="success",
                                     width=20, command=self.launch_game_thread)
@@ -829,6 +683,16 @@ class App(tb.Window):
 
     def open_website(self):
         webbrowser.open(WEBSITE_URL)
+
+    def _first_run_create_shortcut(self):
+        ok = create_desktop_shortcut(self.log)
+        self.cfg["shortcut_created"] = True
+        save_config(self.cfg)
+        if ok:
+            self.log("📌 Đã tự động tạo shortcut Desktop cho lần chạy đầu tiên.")
+
+    def create_shortcut_thread(self):
+        threading.Thread(target=lambda: create_desktop_shortcut(self.log), daemon=True).start()
 
     # ---------------------------------------------------------- overview tab
     def _build_overview_tab(self):
@@ -842,12 +706,28 @@ class App(tb.Window):
         dirbar.pack(fill="x", pady=(0, 12))
         tb.Label(dirbar, text=self.LANG["mc_dir_label"], font=("", 9, "bold")).pack(side="left")
         self.dir_var = tk.StringVar(value=str(self.mc_dir))
-        tb.Entry(dirbar, textvariable=self.dir_var, bootstyle="primary").pack(
+        tb.Entry(dirbar, textvariable=self.dir_var).pack(
             side="left", fill="x", expand=True, padx=8)
         tb.Button(dirbar, text=self.LANG["btn_choose"], bootstyle="secondary-outline",
                    command=self.choose_dir).pack(side="left", padx=2)
         tb.Button(dirbar, text="⟳", bootstyle="secondary-outline", width=3,
                    command=self.refresh_all).pack(side="left")
+
+        # Cards
+        self.card_frame = tb.Frame(f)
+        self.card_frame.pack(fill="x", pady=(0, 14))
+        self.card_labels = {}
+        styles = ["info", "success", "warning", "danger"]
+        for i, (key, exts, icon, label) in enumerate(CATEGORIES):
+            card = tb.Frame(self.card_frame, bootstyle=f"{styles[i % 4]}", padding=14)
+            card.grid(row=0, column=i, sticky="nsew", padx=6)
+            self.card_frame.columnconfigure(i, weight=1)
+            tb.Label(card, text=icon, font=("", 22), bootstyle=f"inverse-{styles[i % 4]}").pack()
+            count_lbl = tb.Label(card, text="0", font=("", 22, "bold"),
+                                   bootstyle=f"inverse-{styles[i % 4]}")
+            count_lbl.pack()
+            tb.Label(card, text=label, font=("", 9), bootstyle=f"inverse-{styles[i % 4]}").pack()
+            self.card_labels[key] = count_lbl
 
         # File list
         list_wrap = tb.Labelframe(f, text="Chi tiết file", padding=8, bootstyle="secondary")
@@ -870,15 +750,13 @@ class App(tb.Window):
         d = filedialog.askdirectory(initialdir=str(self.mc_dir))
         if d:
             self.mc_dir = Path(d)
-            result = ensure_minecraft_dir(self.mc_dir)
+            created = ensure_minecraft_dir(self.mc_dir)
             self.dir_var.set(str(self.mc_dir))
             self.cfg["mc_dir"] = str(self.mc_dir)
             save_config(self.cfg)
             self.refresh_all()
-            if result["first_time"]:
+            if created:
                 self.log(f"📁 Đã tự động khởi tạo thư mục .minecraft mới tại: {self.mc_dir}")
-            elif result["created"]:
-                self.log(f"🔍 Đã tạo bù thư mục con còn thiếu: {', '.join(result['created'])}")
 
     def refresh_all(self):
         if hasattr(self, "dir_var"):
@@ -896,6 +774,7 @@ class App(tb.Window):
                         items.append(item.name)
             items.sort()
             totals[key] = len(items)
+            self.card_labels[key].config(text=str(len(items)))
             for it in items:
                 self.tree.insert("", "end", values=(f"{icon} {label}", it))
         installed = set()
@@ -911,23 +790,15 @@ class App(tb.Window):
 
         tb.Label(f, text="Java", font=("", 11, "bold")).grid(row=0, column=0, sticky="w", **pad)
         self.java_var = tk.StringVar(value=self.cfg["java_path"])
-        tb.Entry(f, textvariable=self.java_var, width=45, bootstyle="primary").grid(
+        tb.Entry(f, textvariable=self.java_var, width=45).grid(
             row=0, column=1, sticky="w", **pad)
         tb.Button(f, text="Chọn file...", bootstyle="secondary-outline",
                    command=self.choose_java).grid(row=0, column=2, sticky="w", padx=6)
 
-        java_row = tb.Frame(f)
-        java_row.grid(row=1, column=1, columnspan=2, sticky="w", pady=(0, 6))
-        self.java_status_lbl = tb.Label(java_row, text="☕ Chưa kiểm tra Java",
-                                          bootstyle="secondary", font=("", 9))
-        self.java_status_lbl.pack(side="left")
-        tb.Button(java_row, text="⬇ Kiểm tra / Cài Java tự động", bootstyle="info-outline",
-                   command=self.install_java_thread).pack(side="left", padx=(12, 0))
-
         tb.Label(f, text="RAM cấp cho game", font=("", 11, "bold")).grid(
-            row=2, column=0, sticky="w", **pad)
+            row=1, column=0, sticky="w", **pad)
         ram_wrap = tb.Frame(f)
-        ram_wrap.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
+        ram_wrap.grid(row=1, column=1, columnspan=2, sticky="w", **pad)
         self.ram_var = tk.IntVar(value=self.cfg["ram_mb"])
         self.ram_scale = tb.Scale(ram_wrap, from_=1024, to=16384, orient="horizontal",
                                     variable=self.ram_var, length=320, bootstyle="info",
@@ -938,26 +809,29 @@ class App(tb.Window):
         self.ram_lbl.pack(side="left", padx=10)
 
         tb.Label(f, text="Tên người chơi", font=("", 11, "bold")).grid(
-            row=3, column=0, sticky="w", **pad)
+            row=2, column=0, sticky="w", **pad)
         self.user_var = tk.StringVar(value=self.cfg["username"])
-        tb.Entry(f, textvariable=self.user_var, width=25, bootstyle="primary").grid(
-            row=3, column=1, sticky="w", **pad)
+        tb.Entry(f, textvariable=self.user_var, width=25).grid(
+            row=2, column=1, sticky="w", **pad)
 
         tb.Label(f, text="Azure client_id\n(login Microsoft)", font=("", 11, "bold")).grid(
-            row=4, column=0, sticky="w", **pad)
+            row=3, column=0, sticky="w", **pad)
         self.client_id_var = tk.StringVar(value=self.cfg["azure_client_id"])
-        tb.Entry(f, textvariable=self.client_id_var, width=45, bootstyle="primary").grid(
-            row=4, column=1, sticky="w", **pad)
+        tb.Entry(f, textvariable=self.client_id_var, width=45).grid(
+            row=3, column=1, sticky="w", **pad)
         tb.Button(f, text="🔑 Login Microsoft", bootstyle="warning-outline",
-                   command=self.login_microsoft_thread).grid(row=4, column=2, sticky="w", padx=6)
+                   command=self.login_microsoft_thread).grid(row=3, column=2, sticky="w", padx=6)
 
         tb.Button(f, text="💾 Lưu cài đặt", bootstyle="success",
-                   command=self.save_settings).grid(row=5, column=1, sticky="w", pady=18)
+                   command=self.save_settings).grid(row=4, column=1, sticky="w", pady=18)
+
+        tb.Button(f, text=self.LANG["btn_shortcut"], bootstyle="primary-outline",
+                   command=self.create_shortcut_thread).grid(row=4, column=2, sticky="w", pady=18)
 
         note = ("Để trống Azure client_id → chạy chế độ offline/dev "
                 "(chơi singleplayer hoặc server online-mode=false).")
         tb.Label(f, text=note, bootstyle="secondary", wraplength=520,
-                  justify="left").grid(row=6, column=0, columnspan=3, sticky="w", pady=6)
+                  justify="left").grid(row=5, column=0, columnspan=3, sticky="w", pady=6)
 
     def _on_ram_change(self, val):
         self.ram_lbl.config(text=f"{int(float(val))} MB")
@@ -975,132 +849,6 @@ class App(tb.Window):
         })
         save_config(self.cfg)
         self.log("✅ Đã lưu cài đặt.")
-
-    # ------------------------------------------------------------- Java
-    def _set_java_status(self, text, bootstyle="secondary"):
-        self.after(0, lambda: self.java_status_lbl.config(text=text, bootstyle=bootstyle))
-
-    def check_java_startup(self):
-        """Tự động kiểm tra Java ngay khi mở launcher — chạy nền, không chặn UI.
-        Nếu thiếu hoặc quá cũ, tự động tải OpenJDK phù hợp mà không cần bấm gì."""
-        threading.Thread(target=self._check_java_background, daemon=True).start()
-
-    def _check_java_background(self):
-        try:
-            configured = self.java_var.get().strip() or "java"
-            exe = resolve_java_path(configured)
-            version = get_java_version(exe) if exe else None
-
-            if exe and version and version >= JAVA_MAJOR_REQUIRED:
-                self.log(f"☕ Đã có Java {version} tại: {exe}")
-                self._set_java_status(f"☕ Java {version} — OK", "success")
-                return
-
-            # Chưa có Java hợp lệ theo cấu hình — thử bản đã tự cài trước đó
-            bundled = find_bundled_java()
-            if bundled:
-                bv = get_java_version(bundled)
-                if bv and bv >= JAVA_MAJOR_REQUIRED:
-                    self.java_var.set(str(bundled))
-                    self.cfg["java_path"] = str(bundled)
-                    save_config(self.cfg)
-                    self.log(f"☕ Dùng lại Java {bv} đã tải trước đó: {bundled}")
-                    self._set_java_status(f"☕ Java {bv} — OK", "success")
-                    return
-
-            if exe and version:
-                self.log(f"⚠ Java hiện tại là bản {version}, Minecraft {MC_VERSION} "
-                          f"cần Java {JAVA_MAJOR_REQUIRED}+ — sẽ tự động cài bản phù hợp.")
-            else:
-                self.log(f"⚠ Chưa tìm thấy Java trên máy — sẽ tự động cài OpenJDK "
-                          f"{JAVA_MAJOR_REQUIRED} (Eclipse Temurin).")
-            self._set_java_status("☕ Đang tự động cài Java...", "warning")
-            self._install_java_auto()
-        except Exception as e:
-            self.log(f"❌ Lỗi khi kiểm tra Java: {e}")
-            write_error_log("Kiểm tra Java lúc khởi động", exc=e)
-
-    def install_java_thread(self):
-        threading.Thread(target=self._install_java_auto, daemon=True).start()
-
-    def _install_java_auto(self):
-        try:
-            self.set_status("Đang cài Java...", "warning-inverse-primary")
-            self._set_java_status("☕ Đang cài đặt...", "warning")
-            self.log(f"☕ Bắt đầu cài OpenJDK {JAVA_MAJOR_REQUIRED}...")
-
-            # Bước 1 (chỉ Linux): thử qua trình quản lý gói hệ thống trước —
-            # nhanh hơn, cập nhật được qua hệ thống, phù hợp CachyOS/Arch/Debian/Ubuntu.
-            if OS_INFO.get("system") == "Linux" and OS_INFO.get("pkg_manager"):
-                self.log(f"  → Thử cài qua trình quản lý gói ({OS_INFO['pkg_manager']})...")
-                if install_java_via_pkg_manager(OS_INFO, JAVA_MAJOR_REQUIRED):
-                    exe = shutil.which("java")
-                    ver = get_java_version(exe) if exe else None
-                    if exe and ver and ver >= JAVA_MAJOR_REQUIRED:
-                        self.java_var.set(exe)
-                        self.cfg["java_path"] = exe
-                        save_config(self.cfg)
-                        self.log(f"✅ Đã cài Java {ver} qua trình quản lý gói: {exe}")
-                        self._set_java_status(f"☕ Java {ver} — OK", "success")
-                        self.set_status("Sẵn sàng")
-                        return
-                    self.log("  ⚠ Gói hệ thống không đủ mới hoặc không có sẵn — "
-                              "chuyển sang tải bản OpenJDK rời (portable).")
-                else:
-                    self.log("  ⚠ Không cài được qua trình quản lý gói — "
-                              "chuyển sang tải bản OpenJDK rời (portable).")
-
-            # Bước 2 (Windows luôn dùng cách này, Linux dùng khi bước 1 thất bại):
-            # tải thẳng bản Eclipse Temurin (Adoptium) — không cần quyền quản trị.
-            if requests is None:
-                self.log("❌ Thiếu thư viện 'requests' nên không thể tự tải Java. "
-                          "Cài thủ công: pip install requests --break-system-packages")
-                self._set_java_status("☕ Cần cài Java thủ công", "danger")
-                self.set_status("Lỗi", "danger-inverse-primary")
-                return
-
-            url, ext = adoptium_download_info(JAVA_MAJOR_REQUIRED)
-            if not url:
-                self.log(f"❌ Không hỗ trợ tự động cài Java trên hệ điều hành/kiến trúc này "
-                          f"({OS_INFO.get('pretty')}). Vui lòng cài Java {JAVA_MAJOR_REQUIRED}+ thủ công "
-                          "rồi chọn file java trong mục Cài đặt.")
-                self._set_java_status("☕ Cần cài Java thủ công", "danger")
-                self.set_status("Lỗi", "danger-inverse-primary")
-                return
-
-            JRE_DIR.mkdir(parents=True, exist_ok=True)
-            archive_path = JRE_DIR / f"openjdk{JAVA_MAJOR_REQUIRED}.{ext}"
-            self.log(f"⬇ Đang tải OpenJDK {JAVA_MAJOR_REQUIRED} (Eclipse Temurin)... "
-                      "có thể mất vài phút tuỳ tốc độ mạng.")
-            download_file(url, archive_path, log_fn=self.log)
-
-            self.log("📦 Đang giải nén Java...")
-            extract_archive(archive_path, JRE_DIR, ext)
-            archive_path.unlink(missing_ok=True)
-
-            java_exe = find_bundled_java()
-            if not java_exe:
-                raise RuntimeError("Đã tải và giải nén nhưng không tìm thấy file java bên trong.")
-            if platform.system() != "Windows":
-                try:
-                    os.chmod(java_exe, 0o755)
-                except Exception:
-                    pass
-
-            ver = get_java_version(java_exe) or JAVA_MAJOR_REQUIRED
-            self.java_var.set(str(java_exe))
-            self.cfg["java_path"] = str(java_exe)
-            save_config(self.cfg)
-            self.log(f"✅ Đã cài Java {ver} thành công tại: {java_exe}")
-            self._set_java_status(f"☕ Java {ver} — OK", "success")
-            self.set_status("Sẵn sàng")
-        except Exception as e:
-            self.log(f"❌ Lỗi khi cài Java: {e}")
-            log_path = write_error_log("Cài OpenJDK tự động", exc=e)
-            if log_path:
-                self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self._set_java_status("☕ Cài Java thất bại", "danger")
-            self.set_status("Lỗi", "danger-inverse-primary")
 
     # -------------------------------------------------------- optimize tab
     def _build_optimize_tab(self):
@@ -1127,134 +875,58 @@ class App(tb.Window):
         tb.Button(f, text="🚀 Áp dụng tối ưu FPS ngay", bootstyle="success",
                    command=self.apply_optimization_thread).pack(anchor="w")
 
+    # ---------------------------------------------------------- console tab
+    def _build_console_tab(self):
+        f = self.tab_console
+        tb.Label(f, text="💻 Console — theo dõi & gửi lệnh khi game đang chạy",
+                  bootstyle="secondary").pack(anchor="w", pady=(0, 6))
+
+        self.console_widget = ScrolledText(f, autohide=True, height=16)
+        self.console_widget.pack(fill="both", expand=True)
+        self.console_widget.text.configure(bg="#0d1117", fg="#58a6ff", insertbackground="#58a6ff")
+
+        cmd_bar = tb.Frame(f)
+        cmd_bar.pack(fill="x", pady=(8, 0))
+        self.console_cmd_var = tk.StringVar()
+        entry = tb.Entry(cmd_bar, textvariable=self.console_cmd_var)
+        entry.pack(side="left", fill="x", expand=True)
+        entry.bind("<Return>", lambda e: self.send_console_command())
+        tb.Button(cmd_bar, text="Gửi ▶", bootstyle="primary",
+                   command=self.send_console_command).pack(side="left", padx=(6, 0))
+
+    def send_console_command(self):
+        cmd = self.console_cmd_var.get().strip()
+        if not cmd:
+            return
+        self.console_cmd_var.set("")
+        if self.game_proc and self.game_proc.poll() is None and self.game_proc.stdin:
+            try:
+                self.game_proc.stdin.write(cmd + "\n")
+                self.game_proc.stdin.flush()
+                self.log(f"» {cmd}")
+            except Exception as e:
+                self.log(f"⚠ Không gửi được lệnh tới game: {e}")
+        else:
+            self.log("⚠ Game chưa chạy — không có tiến trình để gửi lệnh.")
+
     # -------------------------------------------------------------- log tab
     def _build_log_tab(self):
-        f = self.tab_log
+        self.log_widget = ScrolledText(self.tab_log, autohide=True, height=18)
+        self.log_widget.pack(fill="both", expand=True)
+        self.log_widget.text.configure(bg="#0d1117", fg="#3fb950", insertbackground="#3fb950")
 
-        toolbar = tb.Frame(f)
-        toolbar.pack(fill="x", pady=(0, 8))
-        tb.Label(toolbar, text="🖥️  Console", font=("", 12, "bold")).pack(side="left")
-        tb.Button(toolbar, text=self.LANG["btn_save_console"], bootstyle="info-outline",
-                   command=self.save_console_to_file).pack(side="right", padx=(6, 0))
-        tb.Button(toolbar, text=self.LANG["btn_clear_console"], bootstyle="secondary-outline",
-                   command=self.clear_console).pack(side="right")
-
-        # Khung console kiểu terminal thật (nền tối, chữ đơn cách) — đặt trong
-        # khung viền xanh để vẫn ăn khớp với tông trắng-xanh của launcher.
-        console_wrap = tb.Frame(f, bootstyle="primary", padding=2)
-        console_wrap.pack(fill="both", expand=True)
-
-        self.log_widget = ScrolledText(console_wrap, autohide=True, height=18,
-                                         font=("Consolas", 10))
-        self.log_widget.pack(fill="both", expand=True, padx=1, pady=1)
-        txt = self.log_widget.text
-        txt.configure(bg="#0b1220", fg="#d7e3f4", insertbackground="#d7e3f4",
-                       relief="flat", padx=8, pady=6)
-
-        # Tag màu theo cấp độ log — giống console launcher thật
-        txt.tag_configure("ts", foreground="#5b7ca8")
-        txt.tag_configure("lvl_info", foreground="#7fb2ff")
-        txt.tag_configure("lvl_success", foreground="#33d17a")
-        txt.tag_configure("lvl_warn", foreground="#f2c94c")
-        txt.tag_configure("lvl_error", foreground="#ff6b6b")
-        txt.tag_configure("lvl_default", foreground="#d7e3f4")
-
-    def clear_console(self):
-        self.log_widget.text.delete("1.0", "end")
-
-    def save_console_to_file(self):
-        content = self.log_widget.text.get("1.0", "end").strip()
-        try:
-            ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            out_path = ERROR_LOG_DIR / f"console_{ts}.txt"
-            out_path.write_text(content + "\n", encoding="utf-8")
-            self.log(f"💾 Đã lưu console ra file: {out_path}")
-        except Exception as e:
-            self.log(f"❌ Không thể lưu console: {e}")
-
-    def log(self, msg, level=None):
-        """Ghi 1 dòng ra console kèm timestamp + màu theo cấp độ.
-
-        level tự suy ra từ nội dung nếu không truyền vào (dựa trên icon
-        ❌/⚠/✅ đã được dùng nhất quán khắp launcher).
-        """
-        text = str(msg)
-        if level is None:
-            if text.startswith("❌"):
-                level = "error"
-            elif text.startswith("⚠"):
-                level = "warn"
-            elif text.startswith("✅") or text.startswith("🎉"):
-                level = "success"
-            elif text.startswith(("🖥", "📁", "🔍", "⏳", "👉", "▶", "🚀", "⬇", "🔑", "📝", "💾", "ℹ")):
-                level = "info"
-            else:
-                level = "default"
-        tag = f"lvl_{level}" if level in ("info", "success", "warn", "error") else "lvl_default"
-
+    def log(self, msg):
         def _do():
-            txt = self.log_widget.text
-            ts = datetime.now().strftime("%H:%M:%S")
-            txt.insert("end", f"[{ts}] ", "ts")
-            txt.insert("end", text + "\n", tag)
-            txt.see("end")
+            line = str(msg) + "\n"
+            self.log_widget.text.insert("end", line)
+            self.log_widget.text.see("end")
+            if hasattr(self, "console_widget"):
+                self.console_widget.text.insert("end", line)
+                self.console_widget.text.see("end")
         self.after(0, _do)
 
     def set_status(self, text, style="success-inverse-primary"):
         self.after(0, lambda: self.status_badge.config(text=f"● {text}", bootstyle=style))
-
-    # -------------------------------------------------- Discord Rich Presence
-    def _init_discord_rpc(self):
-        if DiscordPresence is None:
-            self.log("ℹ Discord Rich Presence: chưa cài 'pypresence' — bỏ qua (không ảnh hưởng launcher).")
-            return
-
-        def _connect():
-            try:
-                rpc = DiscordPresence(DISCORD_CLIENT_ID)
-                rpc.connect()
-                self.discord_rpc = rpc
-                self.log("🎮 Đã kết nối Discord Rich Presence.")
-                self.set_discord_activity("Đang mở Arch Client", "Tổng quan")
-            except Exception as e:
-                self.discord_rpc = None
-                self.log(f"ℹ Không kết nối được Discord (Discord có đang mở không?): {e}")
-
-        threading.Thread(target=_connect, daemon=True).start()
-
-    def set_discord_activity(self, details, state=None):
-        """Cập nhật trạng thái hiện lên Discord: đang làm gì (details) /
-        đang ở đâu hay tải gì (state). Lỗi khi cập nhật (Discord bị đóng
-        giữa chừng...) được bỏ qua âm thầm, không làm ảnh hưởng launcher."""
-        if not self.discord_rpc:
-            return
-        try:
-            self.discord_rpc.update(
-                details=details,
-                state=state or "Arch Client",
-                start=self.discord_start_time,
-                large_image="logo",
-                large_text="Arch Client — Minecraft Fabric Launcher",
-            )
-        except Exception:
-            self.discord_rpc = None
-
-    def _on_tab_changed(self, _event=None):
-        try:
-            current = self.nb.select()
-            label = self._discord_tab_states.get(current, "Đang xem launcher")
-            self.set_discord_activity(label, f"Minecraft {MC_VERSION} · Fabric")
-        except Exception:
-            pass
-
-    def _on_close(self):
-        if self.discord_rpc:
-            try:
-                self.discord_rpc.close()
-            except Exception:
-                pass
-        self.destroy()
 
     # ------------------------------------------------------- Fabric install
     def install_fabric_thread(self):
@@ -1267,6 +939,23 @@ class App(tb.Window):
         try:
             self.set_status("Đang cài Fabric...", "warning-inverse-primary")
             self.mc_dir.mkdir(parents=True, exist_ok=True)
+
+            before = _snapshot_mc_files(self.mc_dir)
+            jar_path = self.mc_dir / "versions" / MC_VERSION / f"{MC_VERSION}.jar"
+            if not jar_path.exists():
+                if before:
+                    self.log(f"🔍 Phát hiện thiếu file gốc Minecraft {MC_VERSION} — đang tải bù...")
+                else:
+                    self.log(f"📦 Chưa có file Minecraft nào — đang tự tạo & tải toàn bộ từ đầu...")
+                vanilla_cb = {
+                    "setStatus": lambda text: self.log(f"  {text}"),
+                    "setProgress": lambda value: None,
+                    "setMax": lambda value: None,
+                }
+                mll.install.install_minecraft_version(MC_VERSION, str(self.mc_dir), callback=vanilla_cb)
+            else:
+                self.log(f"✅ Đã có đủ file gốc Minecraft {MC_VERSION}.")
+
             self.log(f"⏳ Đang cài Fabric Loader cho Minecraft {MC_VERSION}...")
             callback = {
                 "setStatus": lambda text: self.log(f"  {text}"),
@@ -1274,13 +963,16 @@ class App(tb.Window):
                 "setMax": lambda value: None,
             }
             mll.fabric.install_fabric(MC_VERSION, str(self.mc_dir), callback=callback)
+
+            after = _snapshot_mc_files(self.mc_dir)
+            new_files = after - before
+            if new_files:
+                self.log(f"📥 Đã tải mới {len(new_files)} file còn thiếu (versions/libraries/assets).")
             self.log("✅ Cài Fabric thành công!")
             self.set_status("Sẵn sàng")
         except Exception as e:
+            write_error_log("Cài Fabric", e)
             self.log(f"❌ Lỗi khi cài Fabric: {e}")
-            log_path = write_error_log("Cài Fabric", exc=e)
-            if log_path:
-                self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
             self.set_status("Lỗi", "danger-inverse-primary")
 
     # ------------------------------------------------------- Microsoft auth
@@ -1311,10 +1003,8 @@ class App(tb.Window):
             self.user_var.set(token["name"])
             self.log(f"✅ Đăng nhập thành công: {token['name']}")
         except Exception as e:
+            write_error_log("Đăng nhập Microsoft", e)
             self.log(f"❌ Lỗi đăng nhập Microsoft: {e}")
-            log_path = write_error_log("Đăng nhập Microsoft", exc=e)
-            if log_path:
-                self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
 
     # ------------------------------------------------------------- Launch
     def launch_game_thread(self):
@@ -1326,21 +1016,6 @@ class App(tb.Window):
     def _launch_game(self):
         try:
             self.set_status("Đang khởi chạy...", "warning-inverse-primary")
-
-            java_path = self.java_var.get().strip() or "java"
-            resolved_java = resolve_java_path(java_path)
-            if not resolved_java:
-                self.log(f"❌ Không tìm thấy Java tại '{java_path}'. "
-                          "Bấm 'Kiểm tra / Cài Java tự động' trong tab Cài đặt trước.")
-                self.set_status("Thiếu Java", "danger-inverse-primary")
-                return
-            jver = get_java_version(resolved_java)
-            if jver and jver < JAVA_MAJOR_REQUIRED:
-                self.log(f"⚠ Java hiện tại là bản {jver}, Minecraft {MC_VERSION} cần Java "
-                          f"{JAVA_MAJOR_REQUIRED}+. Bấm 'Kiểm tra / Cài Java tự động' để cập nhật.")
-                self.set_status("Java quá cũ", "danger-inverse-primary")
-                return
-
             versions = [
                 v["id"] for v in mll.utils.get_installed_versions(str(self.mc_dir))
                 if v["id"].startswith("fabric-loader") and MC_VERSION in v["id"]
@@ -1372,48 +1047,63 @@ class App(tb.Window):
                 "uuid": self.uuid or "00000000-0000-0000-0000-000000000000",
                 "token": self.access_token or "0",
                 "jvmArguments": jvm_args,
-                "launcherName": "ArchClient",
+                "launcherName": "FabricLauncherPro",
                 "launcherVersion": "2.0",
             }
             command = mll.command.get_minecraft_command(version_id, str(self.mc_dir), options)
-            command[0] = resolved_java
+            java_path = self.java_var.get().strip() or "java"
+            command[0] = java_path
 
             self.log("▶ Đang khởi chạy Minecraft...")
             proc = subprocess.Popen(command, cwd=str(self.mc_dir),
+                                      stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                       text=True, bufsize=1)
+            self.game_proc = proc
             self.set_status("Đang chơi", "success-inverse-primary")
 
             def stream_output():
-                game_log_lines = []
+                tail_lines = []
                 for line in proc.stdout:
-                    game_log_lines.append(line.rstrip())
                     self.log(line.rstrip())
+                    tail_lines.append(line.rstrip())
+                    if len(tail_lines) > 200:
+                        tail_lines.pop(0)
                 ret = proc.wait()
+                self.game_proc = None
                 if ret != 0:
                     self.log(f"❌ Minecraft thoát với mã lỗi {ret}.")
-                    log_path = write_error_log(
-                        f"Minecraft crash (mã lỗi {ret})",
-                        extra_text="--- 200 dòng cuối của game log ---\n" +
-                                    "\n".join(game_log_lines[-200:]))
-                    if log_path:
-                        self.log(f"📝 Chi tiết crash đã ghi vào: {log_path}")
                     self.set_status("Crash", "danger-inverse-primary")
+                    try:
+                        ERROR_LOG_DIR.mkdir(parents=True, exist_ok=True)
+                        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                        fp = ERROR_LOG_DIR / f"error_{ts}_Minecraft_crash_(mã_lỗi_{ret}).txt"
+                        content = (
+                            "=" * 70 + "\n"
+                            "ARCH CLIENT — BÁO CÁO LỖI\n" + "=" * 70 + "\n"
+                            f"Thời gian     : {datetime.datetime.now().isoformat(sep=' ', timespec='seconds')}\n"
+                            f"Ngữ cảnh      : Minecraft crash (mã lỗi {ret})\n"
+                            f"Hệ điều hành  : {OS_INFO['pretty']}\n"
+                            f"Python        : {platform.python_version()}\n"
+                            + "-" * 70 + "\n"
+                            "--- 200 dòng cuối của game log ---\n"
+                            + "\n".join(tail_lines) + "\n"
+                            + "-" * 70 + "\n"
+                            "Traceback đầy đủ:\n(không có traceback — lỗi được báo cáo thủ công)\n"
+                            + "=" * 70 + "\n"
+                        )
+                        fp.write_text(content, encoding="utf-8")
+                        self.log(f"📝 Đã ghi log lỗi ra: {fp}")
+                    except Exception as log_err:
+                        self.log(f"⚠ Không ghi được file lỗi: {log_err}")
                 else:
                     self.log("ℹ Minecraft đã đóng.")
                     self.set_status("Sẵn sàng")
 
             threading.Thread(target=stream_output, daemon=True).start()
-        except FileNotFoundError as e:
-            self.log(f"❌ Không tìm thấy Java tại '{self.java_var.get() or 'java'}': {e}")
-            self.log("   Hãy kiểm tra lại đường dẫn Java trong tab Cài đặt.")
-            write_error_log("Khởi chạy game — thiếu Java", exc=e)
-            self.set_status("Lỗi", "danger-inverse-primary")
         except Exception as e:
+            write_error_log("Khởi chạy Minecraft", e)
             self.log(f"❌ Lỗi khi khởi chạy: {e}")
-            log_path = write_error_log("Khởi chạy game", exc=e)
-            if log_path:
-                self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
             self.set_status("Lỗi", "danger-inverse-primary")
 
     # -------------------------------------------------------- Optimization
@@ -1457,81 +1147,21 @@ class App(tb.Window):
             urllib.request.urlretrieve(file_info["url"], dest)
             self.log(f"  ✅ Đã tải: {file_info['filename']}")
         except Exception as e:
+            write_error_log(f"Tải mod tối ưu ({slug})", e)
             self.log(f"  ❌ Lỗi tải {slug}: {e}")
-            write_error_log(f"Tải mod Modrinth ({slug})", exc=e)
 
     def _apply_optimization(self):
         self.after(0, self.opt_progress.start)
         self.set_status("Đang tối ưu...", "warning-inverse-primary")
         self.log("🚀 Bắt đầu tối ưu FPS...")
-        try:
-            self._write_optimized_options()
-            for slug, var in self.mod_vars.items():
-                if var.get():
-                    self._download_modrinth_mod(slug)
-            self.log("🎉 Hoàn tất tối ưu! Khởi động lại game để áp dụng.")
-            self.set_status("Sẵn sàng")
-        except Exception as e:
-            self.log(f"❌ Lỗi khi tối ưu FPS: {e}")
-            log_path = write_error_log("Tối ưu FPS", exc=e)
-            if log_path:
-                self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self.set_status("Lỗi", "danger-inverse-primary")
-        finally:
-            # Luôn dừng thanh tiến trình dù thành công hay lỗi, tránh treo UI
-            self.after(0, self.opt_progress.stop)
-            self.after(0, self.refresh_all)
-
-
-class SplashScreen(tb.Window):
-    """Cửa sổ splash hiển thị khi launcher đang khởi động (dò ngôn ngữ, tải
-    cấu hình...) trước khi cửa sổ chính (App) được mở."""
-
-    def __init__(self):
-        super().__init__(themename="flatly")
-        self.title("Arch Client")
-        self.overrideredirect(True)  # không viền/thanh tiêu đề
-        self.attributes("-topmost", True)
-
-        width, height = 420, 260
-        self.update_idletasks()
-        sw = self.winfo_screenwidth()
-        sh = self.winfo_screenheight()
-        x = (sw - width) // 2
-        y = (sh - height) // 2
-        self.geometry(f"{width}x{height}+{x}+{y}")
-        self.resizable(False, False)
-
-        self._icon_full = load_icon_image()
-        if self._icon_full:
-            self.iconphoto(True, self._icon_full)
-
-        container = tb.Frame(self, padding=24)
-        container.pack(fill=BOTH, expand=True)
-
-        self._banner_img = load_banner_image(max_width=340)
-        if self._banner_img:
-            tb.Label(container, image=self._banner_img).pack(pady=(10, 15))
-        else:
-            tb.Label(
-                container, text="⚡ Arch Client",
-                font=("Segoe UI", 20, "bold"), bootstyle="primary",
-            ).pack(pady=(20, 15))
-
-        self.status_var = tk.StringVar(value="")
-        tb.Label(
-            container, textvariable=self.status_var,
-            font=("Segoe UI", 10), bootstyle="secondary",
-        ).pack(pady=(0, 12))
-
-        self.bar = tb.Progressbar(
-            container, mode="indeterminate", bootstyle="info-striped",
-        )
-        self.bar.pack(fill=X, padx=10)
-        self.bar.start(12)
-
-    def set_status(self, text):
-        self.status_var.set(text)
+        self._write_optimized_options()
+        for slug, var in self.mod_vars.items():
+            if var.get():
+                self._download_modrinth_mod(slug)
+        self.log("🎉 Hoàn tất tối ưu! Khởi động lại game để áp dụng.")
+        self.after(0, self.opt_progress.stop)
+        self.set_status("Sẵn sàng")
+        self.after(0, self.refresh_all)
 
 
 def run_with_splash():
@@ -1542,6 +1172,7 @@ def run_with_splash():
         lang = detect_language()
         strings = LANG_STRINGS[lang]
         splash.after(0, lambda: splash.set_status(strings["splash_load"]))
+        import time
         time.sleep(0.3)
         splash.after(0, lambda: finish(lang))
 
