@@ -1,4 +1,4 @@
-# Arch Client
+# Arch Laucher
 
 A Minecraft Fabric launcher written in Python. Originally built for my own
 CachyOS/KDE Plasma setup, it now runs on Windows as well as Arch- and
