@@ -1,33 +1,33 @@
 [app]
-title = Arch Client Mobile
-package.name = archclientmobile
-package.domain = org.archclient
-source.dir = .
-source.include_exts = py,png,jpg,kv,atlas,json
-version = 0.1.0
+title = Arch Laucher
+package.name = archlaucher
+package.domain = org.caobeotime
 
-# requests -> mod/fabric downloads, pyjnius -> talk to Android (ABI, package manager, intents)
-requirements = python3,kivy==2.3.0,requests,pyjnius,android,minecraft-launcher-lib
+source.dir = .
+source.include_exts = py,png,jpg,jpeg,kv,atlas,json,ttf,otf,txt
+
+version = 1.0
+
+# Điền đủ lib mà main.py import (sửa lại theo code thực tế)
+requirements = python3,kivy
 
 orientation = portrait
 fullscreen = 0
 
 icon.filename = %(source.dir)s/img/icon.png
 
-# Storage: we need broad file access to reach PojavLauncher's .minecraft folder
-# under Android/data/net.kdt.pojavlaunch/. MANAGE_EXTERNAL_STORAGE is required on
-# Android 11+ for that; it is fine for personal side-loaded use but Google Play
-# restricts apps that request it, so do not expect to publish this on the Play Store
-# without reworking storage access (e.g. Storage Access Framework / SAF picker).
-android.permissions = INTERNET,MANAGE_EXTERNAL_STORAGE,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,QUERY_ALL_PACKAGES
-
-# Samsung A13 is arm64 (Helio G80 / Exynos 850 depending on region).
-# Keep armeabi-v7a too for older/other phones "and other phones" per the request.
-android.archs = arm64-v8a,armeabi-v7a
-
+# --- Android ---
+android.permissions = INTERNET
 android.api = 33
-android.minapi = 24
+android.minapi = 23
 android.ndk = 25b
+android.sdk = 33
+
+# Samsung A13 dùng chip 64-bit -> build riêng arm64 để nhẹ và chạy nhanh hơn
+android.archs = arm64-v8a
+
+android.allow_backup = True
+android.accept_sdk_license = True
 
 [buildozer]
 log_level = 2
