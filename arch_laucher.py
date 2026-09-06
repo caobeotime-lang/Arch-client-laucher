@@ -25,6 +25,13 @@ import webbrowser
 from pathlib import Path
 from datetime import datetime
 
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+        
 # ==========================================================================
 # BOOTSTRAP: nhận diện hệ điều hành + tự cài gói còn thiếu
 # ==========================================================================
@@ -47,8 +54,12 @@ OPTIONAL_PIP_PACKAGES = {
 
 
 def _bprint(msg):
-    print(msg, flush=True)
-
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        enc = sys.stdout.encoding or "utf-8"
+        safe_msg = str(msg).encode(enc, errors="replace").decode(enc, errors="replace")
+        print(safe_msg, flush=True)
 
 # ==========================================================================
 # GHI LOG LỖI RA FILE .txt (mọi lỗi trong launcher đều được lưu lại)
