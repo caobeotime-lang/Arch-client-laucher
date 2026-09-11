@@ -25,6 +25,9 @@ jobs:
           python-version: '3.11'
 
       - name: Build ArchClient.exe
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
         run: python build_windows.py
 
       - name: Gói kèm img/ (và client/ nếu có)
