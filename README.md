@@ -1,113 +1,121 @@
 # Arch Client Launcher — Windows
 
-Launcher Minecraft Fabric, chỉ cần **1 file `.exe` duy nhất**, không cần
-cài Python, không cần cài Java thủ công, không cần `pip install` gì cả.
-Double-click là chạy.
+A Minecraft Fabric launcher, packed into a **single `.exe` file**. No
+Python required, no manual Java install, no `pip install` — just
+double-click and go.
 
 ![Arch Client icon](img/icon.png)
 
 ---
 
-## Tính năng
+## Features
 
-- **Tự tải Java 21** khi thiếu — launcher tự phát hiện và tải thẳng
-  Eclipse Temurin (Adoptium) về, giải nén, dùng luôn, không cần cài đặt
-  thủ công.
-- **Tự dựng cấu trúc thư mục `.minecraft`** — tạo mới hoàn toàn nếu chưa
-  có, hoặc tự bổ sung phần thiếu nếu đã có sẵn từ trước.
-- **Cài/cập nhật Fabric** cho đúng phiên bản Minecraft chỉ với 1 lần bấm.
-- **Tối ưu FPS 1 chạm** — tự ghi `options.txt` đã tinh chỉnh sẵn và tải
-  bộ mod tối ưu hiệu năng phổ biến (Sodium, Lithium, Starlight,
-  FerriteCore, Krypton, LazyDFU, Iris, ModernFix, EntityCulling,
-  ImmediatelyFast) từ Modrinth, khớp đúng phiên bản Minecraft + Fabric.
-- **Đăng nhập Microsoft** để chơi online.
-- **Discord Rich Presence** (tuỳ chọn) — hiện đang chơi gì / đang ở tab
-  nào ngay trên Discord.
-- **Console tích hợp sẵn** — xem log game trực tiếp trong app, lưu log ra
-  file `.txt` khi cần báo lỗi.
-- **Tự ghi log lỗi** — mọi lỗi không mong muốn đều được ghi lại kèm
-  traceback đầy đủ vào `%USERPROFILE%\.config\arch-client-launcher\error_logs\`,
-  không bao giờ crash âm thầm.
-- **Đa ngôn ngữ (VI/EN)** — tự chọn theo vị trí IP, nếu mất mạng thì dùng
-  theo ngôn ngữ hệ thống.
-- **Tự thêm client mod đi kèm** — nếu có sẵn file `.jar` trong thư mục
-  `client/` cạnh `.exe`, launcher tự copy vào `mods/` khi thiếu hoặc
-  chưa cập nhật.
+- **Auto-downloads Java 21** when missing — the launcher detects it and
+  pulls Eclipse Temurin (Adoptium) directly, extracts it, and uses it —
+  no manual installation needed.
+- **Auto-builds the `.minecraft` folder structure** — creates everything
+  from scratch if nothing exists, or fills in just the missing
+  subfolders if an older setup is already there.
+- **Installs/updates Fabric** for the targeted Minecraft version with a
+  single click.
+- **One-click FPS optimization** — writes a pre-tuned `options.txt` and
+  automatically downloads popular performance mods (Sodium, Lithium,
+  Starlight, FerriteCore, Krypton, LazyDFU, Iris, ModernFix,
+  EntityCulling, ImmediatelyFast) from Modrinth, matched to the correct
+  Minecraft + Fabric version.
+- **Microsoft login** for playing online.
+- **Discord Rich Presence** (optional) — shows what you're playing /
+  which tab you're on right on Discord.
+- **Built-in console** — watch game logs live inside the app, save logs
+  to a `.txt` file when you need to report a bug.
+- **Automatic error logging** — every unhandled exception is caught and
+  written to a timestamped `.txt` file with a full traceback in
+  `%USERPROFILE%\.config\arch-client-launcher\error_logs\` — never a
+  silent crash.
+- **Multi-language (VI/EN)** — auto-selected based on your location via
+  IP, falling back to system locale if there's no internet connection.
+- **Auto-adds a bundled client mod** — if a `.jar` file is present in a
+  `client/` folder next to the `.exe`, it's automatically copied into
+  `mods/` if missing or outdated.
 
-## Yêu cầu
+## Requirements
 
 - Windows 10/11.
-- Có mạng ở lần chạy đầu tiên (để tải Java, tải Fabric, xác định ngôn
-  ngữ theo IP). Sau đó vẫn dùng được offline, trừ các tính năng cần
-  mạng (tải mod, đăng nhập).
+- An internet connection on first run (to download Java, download
+  Fabric, and detect language via IP). Works offline afterward, aside
+  from features that need internet (downloading mods, logging in).
 
-## Cài đặt & chạy
+## Installation & running
 
-Không cần cài đặt gì trước — chỉ cần tải `ArchClient.exe` rồi chạy:
+No setup required — just download `ArchClient.exe` and run it:
 
-1. Tải file `ArchClient.exe`.
-2. Double-click để mở.
-3. Nếu Windows hiện cảnh báo **"Windows protected your PC"** (SmartScreen) —
-   đây là bình thường với file `.exe` chưa ký số (code signing), không
-   phải virus. Bấm **More info → Run anyway** để mở.
-4. Lần chạy đầu tiên sẽ lâu hơn một chút vì launcher đang tự tải Java 21
-   và dựng cấu trúc thư mục `.minecraft`. Các lần sau sẽ nhanh hơn nhiều.
+1. Download `ArchClient.exe`.
+2. Double-click to open it.
+3. If Windows shows a **"Windows protected your PC"** warning
+   (SmartScreen) — that's expected for an unsigned `.exe` (no code
+   signing), not a virus. Click **More info → Run anyway** to open it.
+4. The first run takes a bit longer since the launcher is downloading
+   Java 21 and building the `.minecraft` folder structure. Later runs
+   will be much faster.
 
-## Hướng dẫn sử dụng
+## Usage guide
 
-Cửa sổ chính chia làm 4 tab:
+The main window is split into 4 tabs:
 
-| Tab | Dùng để làm gì |
+| Tab | What it's for |
 |---|---|
-| 📊 Overview | Chọn thư mục `.minecraft`, xem danh sách mod/resourcepack/shaderpack/schematic đang cài. |
-| ⚙️ Settings | Tự kiểm tra/cài Java, đăng nhập Microsoft, chỉnh RAM cấp cho game. |
-| 🚀 Optimize FPS | 1 chạm để ghi cấu hình FPS tối ưu + tải bộ mod hiệu năng đã chọn. |
-| 🖥️ Console | Xem log trực tiếp khi game chạy, xoá console, lưu log ra file. |
+| 📊 Overview | Choose the `.minecraft` folder, view the list of mod/resourcepack/shaderpack/schematic files currently installed. |
+| ⚙️ Settings | Auto-check/install Java, log in with Microsoft, adjust RAM allocated to the game. |
+| 🚀 Optimize FPS | One click to write optimized FPS settings + download the selected performance mod set. |
+| 🖥️ Console | Watch live logs while the game runs, clear the console, save logs to a file. |
 
-Ở dưới cùng luôn có 2 nút cố định: **⬇ Install / Update Fabric** (bấm
-trước khi chơi lần đầu hoặc sau khi đổi phiên bản) và **▶ PLAY NOW**. Quy
-trình chuẩn cho lần chơi đầu tiên: cài Fabric → kiểm tra Java ở tab
-Settings → đăng nhập Microsoft (nếu chơi online) → bấm Play Now.
+The footer always has 2 fixed buttons: **⬇ Install / Update Fabric**
+(click before playing for the first time or after changing versions) and
+**▶ PLAY NOW**. The standard first-run flow: install Fabric → check Java
+in the Settings tab → log in with Microsoft (if playing online) → click
+Play Now.
 
-## Xử lý lỗi thường gặp
+## Troubleshooting
 
-**Windows chặn/xoá file khi tải về hoặc khi mở**
-File `.exe` chưa được ký số nên Windows Defender/SmartScreen đôi khi
-báo nhầm. Bấm **More info → Run anyway**, hoặc thêm ngoại lệ trong
-Windows Security nếu cần.
+**Windows blocks or deletes the file on download / when opening it**
+The `.exe` isn't code-signed, so Windows Defender/SmartScreen sometimes
+flags it as a false positive. Click **More info → Run anyway**, or add
+an exception in Windows Security if needed.
 
-**Mở app không lên, hoặc nháy 1 cái console đen rồi tắt ngay**
-Kiểm tra kết nối mạng — lần chạy đầu launcher cần mạng để tải Java và dò
-ngôn ngữ. Nếu vẫn lỗi, tìm file log lỗi mới nhất trong
-`%USERPROFILE%\.config\arch-client-launcher\error_logs\` để xem traceback
-chi tiết.
+**Nothing opens, or a black console window flashes and closes
+immediately**
+Check your internet connection — the first run needs internet to
+download Java and detect language. If it still fails, check the latest
+log file in `%USERPROFILE%\.config\arch-client-launcher\error_logs\` for
+the full traceback.
 
-**Game crash ngay khi mở, log Java báo lỗi liên quan đến
+**Game crashes right on launch, Java log shows an error related to
 `MessageFormat` / `Mod resolution failed`**
-Thường là do 2 mod trong `mods/` xung đột nhau. Tìm dòng
-`Mod resolution failed` và `Immediate reason:` ngay phía trên đoạn crash
-trong `latest.log` (hoặc trong file log ở `error_logs/`) để biết chính
-xác mod nào đang xung đột, rồi gỡ hoặc đổi mod đó.
+This usually means two mods in `mods/` are conflicting. Look for the
+`Mod resolution failed` and `Immediate reason:` lines right above the
+crash in `latest.log` (or in the log file in `error_logs/`) to find out
+exactly which mods are conflicting, then remove or swap one out.
 
-**Discord Rich Presence không hiện**
-Tính năng tuỳ chọn, không bắt buộc — không ảnh hưởng gì đến việc chơi
-game nếu không có.
+**Discord Rich Presence doesn't show up**
+Optional feature, not required — doesn't affect gameplay if it's not
+active.
 
-## Giấy phép
+## License
 
-Phần mềm này **miễn phí cho mục đích cá nhân, phi thương mại**. Được
-phép tải về, chỉnh sửa, chia sẻ lại miễn phí. **Không được** bán, cho
-thuê, đóng gói lại để kiếm lời, hoặc dùng cho mục đích thương mại dưới
-bất kỳ hình thức nào nếu chưa được tác giả đồng ý bằng văn bản. Xem chi
-tiết trong file [`LICENSE`](LICENSE).
+This software is **free for personal, non-commercial use**. You're
+allowed to download, modify, and redistribute it for free. You are
+**not** allowed to sell it, rent it, repackage it for profit, or use it
+for any commercial purpose in any form without prior written consent
+from the author. See the [`LICENSE`](LICENSE) file for details.
 
 ## Credits
 
-Cảm ơn các dự án mã nguồn mở mà Arch Client sử dụng:
+Thanks to the open-source projects Arch Client relies on:
 [Fabric](https://fabricmc.net/),
 [minecraft-launcher-lib](https://github.com/JakobDev/minecraft-launcher-lib),
-[ttkbootstrap](https://ttkbootstrap.readthedocs.io/), cùng các tác giả bộ
-mod tối ưu FPS liệt kê ở trên trên [Modrinth](https://modrinth.com/).
+[ttkbootstrap](https://ttkbootstrap.readthedocs.io/), and all the authors
+of the FPS optimization mods listed above on
+[Modrinth](https://modrinth.com/).
 
 ---
 
