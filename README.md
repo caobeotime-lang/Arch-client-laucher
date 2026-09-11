@@ -1,224 +1,113 @@
-# Arch Laucher
+# Arch Client Launcher — Windows
 
-A Minecraft Fabric launcher written in Python. Originally built for my own
-CachyOS/KDE Plasma setup, it now runs on Windows as well as Arch- and
-Debian-based Linux distros. The goal was simple: click once and play —
-no manually installing Java, setting up Fabric, or worrying about the
-stock launcher not reading whatever messy mod folder structure you left
-behind.
-
-The UI uses `ttkbootstrap` (flatly theme), with a real terminal-style
-console built right into the app for watching logs, and the launcher
-handles nearly everything during first-time setup on its own.
+Launcher Minecraft Fabric, chỉ cần **1 file `.exe` duy nhất**, không cần
+cài Python, không cần cài Java thủ công, không cần `pip install` gì cả.
+Double-click là chạy.
 
 ![Arch Client icon](img/icon.png)
 
 ---
 
-## Why this exists
+## Tính năng
 
-Mojang's official launcher doesn't support Fabric, and third-party
-launchers (MultiMC, Prism...) are great but a bit heavy if all you need is
-a fixed, pre-optimized mod set without much manual tweaking. Arch Client
-automates that part: open it up, it detects what's missing and installs
-it, builds the `.minecraft` folder structure, and comes with a one-click
-"Optimize FPS" button that pulls a curated mod set from Modrinth.
+- **Tự tải Java 21** khi thiếu — launcher tự phát hiện và tải thẳng
+  Eclipse Temurin (Adoptium) về, giải nén, dùng luôn, không cần cài đặt
+  thủ công.
+- **Tự dựng cấu trúc thư mục `.minecraft`** — tạo mới hoàn toàn nếu chưa
+  có, hoặc tự bổ sung phần thiếu nếu đã có sẵn từ trước.
+- **Cài/cập nhật Fabric** cho đúng phiên bản Minecraft chỉ với 1 lần bấm.
+- **Tối ưu FPS 1 chạm** — tự ghi `options.txt` đã tinh chỉnh sẵn và tải
+  bộ mod tối ưu hiệu năng phổ biến (Sodium, Lithium, Starlight,
+  FerriteCore, Krypton, LazyDFU, Iris, ModernFix, EntityCulling,
+  ImmediatelyFast) từ Modrinth, khớp đúng phiên bản Minecraft + Fabric.
+- **Đăng nhập Microsoft** để chơi online.
+- **Discord Rich Presence** (tuỳ chọn) — hiện đang chơi gì / đang ở tab
+  nào ngay trên Discord.
+- **Console tích hợp sẵn** — xem log game trực tiếp trong app, lưu log ra
+  file `.txt` khi cần báo lỗi.
+- **Tự ghi log lỗi** — mọi lỗi không mong muốn đều được ghi lại kèm
+  traceback đầy đủ vào `%USERPROFILE%\.config\arch-client-launcher\error_logs\`,
+  không bao giờ crash âm thầm.
+- **Đa ngôn ngữ (VI/EN)** — tự chọn theo vị trí IP, nếu mất mạng thì dùng
+  theo ngôn ngữ hệ thống.
+- **Tự thêm client mod đi kèm** — nếu có sẵn file `.jar` trong thư mục
+  `client/` cạnh `.exe`, launcher tự copy vào `mods/` khi thiếu hoặc
+  chưa cập nhật.
 
-## Features
+## Yêu cầu
 
-- **Automatic OS detection** — Windows 10/11, Arch Linux and Arch-based
-  distros (Manjaro, EndeavourOS, Garuda, CachyOS...), Debian/Ubuntu and
-  Debian-based distros (Mint, Pop!_OS, Zorin...).
-- **Auto-installs missing Python packages** at startup (`ttkbootstrap`,
-  `minecraft-launcher-lib`, `requests`, `Pillow`...), and automatically
-  handles the `externally-managed-environment` error common on newer
-  distros by falling back to `--break-system-packages`.
-- **Auto-installs missing system packages** for `tkinter`, via `pacman`
-  or `apt` depending on the distro.
-- **Auto-detects and installs the right Java version** for the target
-  Minecraft version (Java 21+ for 1.20.5 and up), downloading directly
-  from Adoptium if needed, or trying the system's package manager first.
-- **Auto-builds the `.minecraft` folder structure** — creates everything
-  from scratch if nothing exists, or fills in just the missing
-  subfolders if an older setup is already there.
-- **Installs/updates Fabric** for the targeted Minecraft version with a
-  single click, no extra steps.
-- **One-click FPS optimization** — writes a pre-tuned `options.txt` and
-  automatically downloads popular performance mods (Sodium, Lithium,
-  Starlight, FerriteCore, Krypton, LazyDFU, Iris, ModernFix,
-  EntityCulling, ImmediatelyFast) from Modrinth, matched to the correct
-  Minecraft + Fabric version.
-- **Microsoft login** for playing online.
-- **Discord Rich Presence** (optional) — shows what you're playing / which
-  tab you're on right on Discord; simply skipped if `pypresence` isn't
-  installed.
-- **Built-in console** — watch game logs live inside the app, save logs
-  to a `.txt` file when you need to report a bug.
-- **Automatic error logging** — every unhandled exception (main thread,
-  background thread, or UI callback) is caught and written to a
-  timestamped `.txt` file in
-  `~/.config/arch-client-launcher/error_logs/`, with a full traceback —
-  never a silent crash.
-- **Multi-language (VI/EN)** — auto-selected based on your location via
-  IP, falling back to system locale if there's no internet connection.
-- **Auto-adds a bundled client mod** — if the launcher ships with a
-  `client/` folder containing a `.jar` file, it's automatically copied
-  into `mods/` if missing or outdated.
+- Windows 10/11.
+- Có mạng ở lần chạy đầu tiên (để tải Java, tải Fabric, xác định ngôn
+  ngữ theo IP). Sau đó vẫn dùng được offline, trừ các tính năng cần
+  mạng (tải mod, đăng nhập).
 
-## Folder structure
+## Cài đặt & chạy
 
-```
-Arch client laucher/
-├── arch_client.py      # the entire launcher, run this file
-├── client/              # (optional) bundled client mod, auto-copied into mods/
-│   └── arch-client-1.21.11.jar
-└── img/
-    ├── icon.png          # window/taskbar icon
-    └── banner.png        # banner shown on the Overview tab and splash screen
-```
+Không cần cài đặt gì trước — chỉ cần tải `ArchClient.exe` rồi chạy:
 
-If `img/icon.png` or `img/banner.png` are missing, the launcher still
-runs fine — it just shows text instead of the image. The `client/` folder
-is also optional; if it's not there, the launcher simply skips the mod-copy
-step without any error.
+1. Tải file `ArchClient.exe`.
+2. Double-click để mở.
+3. Nếu Windows hiện cảnh báo **"Windows protected your PC"** (SmartScreen) —
+   đây là bình thường với file `.exe` chưa ký số (code signing), không
+   phải virus. Bấm **More info → Run anyway** để mở.
+4. Lần chạy đầu tiên sẽ lâu hơn một chút vì launcher đang tự tải Java 21
+   và dựng cấu trúc thư mục `.minecraft`. Các lần sau sẽ nhanh hơn nhiều.
 
-## Requirements
+## Hướng dẫn sử dụng
 
-- Python 3.9 or newer (uses `sys.getwindowsversion` and modern type hints,
-  so a fairly recent version is needed).
-- An internet connection on first run (to install libraries, download
-  Fabric, download Java, and detect language via IP). It works offline
-  afterward, aside from features that need internet (downloading mods,
-  logging in).
-- On Linux, working `sudo` access is needed if the launcher has to install
-  system packages (`tk`, `jdk-openjdk`...) — it automatically prepends
-  `sudo` to commands when required.
+Cửa sổ chính chia làm 4 tab:
 
-## Installation & running
-
-No setup required beforehand — clone or download the repo and run it
-directly:
-
-```bash
-python3 arch_client.py
-```
-
-The first run will take a bit longer since the launcher has to install
-missing Python packages, detect Java, and build the `.minecraft` folder
-structure. Later runs will be faster since everything's already in place.
-
-If you'd rather install everything manually first:
-
-```bash
-pip install minecraft-launcher-lib requests ttkbootstrap pillow --break-system-packages
-```
-
-## Usage guide
-
-The main window is split into 4 tabs:
-
-| Tab | What it's for |
+| Tab | Dùng để làm gì |
 |---|---|
-| 📊 Overview | Choose the `.minecraft` folder, view the list of mod/resourcepack/shaderpack/schematic files currently installed. |
-| ⚙️ Settings | Auto-check/install Java, log in with Microsoft, adjust RAM allocated to the game. |
-| 🚀 Optimize FPS | One click to write optimized FPS settings + download the selected performance mod set. |
-| 🖥️ Console | Watch live logs while the game runs, clear the console, save logs to a file. |
+| 📊 Overview | Chọn thư mục `.minecraft`, xem danh sách mod/resourcepack/shaderpack/schematic đang cài. |
+| ⚙️ Settings | Tự kiểm tra/cài Java, đăng nhập Microsoft, chỉnh RAM cấp cho game. |
+| 🚀 Optimize FPS | 1 chạm để ghi cấu hình FPS tối ưu + tải bộ mod hiệu năng đã chọn. |
+| 🖥️ Console | Xem log trực tiếp khi game chạy, xoá console, lưu log ra file. |
 
-The footer always has 2 fixed buttons: **⬇ Install / Update Fabric**
-(click before playing for the first time or after changing versions) and
-**▶ PLAY NOW**. The standard flow for a first run: install Fabric → check
-Java in the Settings tab → log in with Microsoft (if playing online) →
-click Play Now.
+Ở dưới cùng luôn có 2 nút cố định: **⬇ Install / Update Fabric** (bấm
+trước khi chơi lần đầu hoặc sau khi đổi phiên bản) và **▶ PLAY NOW**. Quy
+trình chuẩn cho lần chơi đầu tiên: cài Fabric → kiểm tra Java ở tab
+Settings → đăng nhập Microsoft (nếu chơi online) → bấm Play Now.
 
-## Troubleshooting
+## Xử lý lỗi thường gặp
 
-**Launcher won't open, reports missing `tkinter`**
-Your distro ships `tkinter` separately from base Python. Install it with
-`sudo pacman -S tk` (Arch) or `sudo apt install python3-tk`
-(Debian/Ubuntu), then run again — the launcher also tries to do this
-itself if it has sudo access, but if your environment doesn't allow
-automatic sudo, you'll need to do it manually.
+**Windows chặn/xoá file khi tải về hoặc khi mở**
+File `.exe` chưa được ký số nên Windows Defender/SmartScreen đôi khi
+báo nhầm. Bấm **More info → Run anyway**, hoặc thêm ngoại lệ trong
+Windows Security nếu cần.
 
-**Game crashes right on launch, Java log shows an error related to
+**Mở app không lên, hoặc nháy 1 cái console đen rồi tắt ngay**
+Kiểm tra kết nối mạng — lần chạy đầu launcher cần mạng để tải Java và dò
+ngôn ngữ. Nếu vẫn lỗi, tìm file log lỗi mới nhất trong
+`%USERPROFILE%\.config\arch-client-launcher\error_logs\` để xem traceback
+chi tiết.
+
+**Game crash ngay khi mở, log Java báo lỗi liên quan đến
 `MessageFormat` / `Mod resolution failed`**
-This means two mods in `mods/` are conflicting (one mod needs another
-you haven't installed, or two mods declare themselves incompatible) — a
-bug in Fabric Loader itself causes the real error message to get masked
-by an unrelated exception that looks like a date-format error. Look for
-the `Mod resolution failed` and `Immediate reason:` lines right above the
-crash in `latest.log` (or in the log file the launcher automatically
-writes to `error_logs/`) to find out exactly which mods are conflicting,
-then remove or swap one out.
+Thường là do 2 mod trong `mods/` xung đột nhau. Tìm dòng
+`Mod resolution failed` và `Immediate reason:` ngay phía trên đoạn crash
+trong `latest.log` (hoặc trong file log ở `error_logs/`) để biết chính
+xác mod nào đang xung đột, rồi gỡ hoặc đổi mod đó.
 
-**Automatic Python package installation fails**
-Usually because there's no internet on first run, or pip is blocked by a
-firewall/proxy. Install manually using the command the launcher prints
-in the console (it already includes the `--break-system-packages` flag),
-or check your internet connection first.
+**Discord Rich Presence không hiện**
+Tính năng tuỳ chọn, không bắt buộc — không ảnh hưởng gì đến việc chơi
+game nếu không có.
 
-**Discord Rich Presence doesn't show up**
-Missing `pypresence` — not required, the launcher still works fine, you
-just lose the Discord status feature. Install it with
-`pip install pypresence --break-system-packages` if you want to enable it.
+## Giấy phép
 
-## Build bản .exe tối ưu cho Windows (không cần Python / pip thủ công)
-
-Bản `.exe` đóng gói cũ trên Windows bị lỗi "không tải được thư viện" vì nó
-cố tự `pip install` bằng **chính file `.exe`** — mà `.exe` không có lệnh
-`-m pip` nên luôn thất bại. Launcher giờ tự nhận diện khi đang chạy dưới
-dạng `.exe` đóng gói (`FROZEN`) và bỏ qua hoàn toàn bước pip lúc runtime,
-vì mọi thư viện đã được nhúng sẵn ngay lúc build.
-
-Trên máy **có Python** (chỉ máy dùng để build cần Python, người nhận file
-`.exe` thì không cần), chạy:
-
-```bash
-python build_windows.py
-```
-
-Script này tự cài đủ thư viện (`ttkbootstrap`, `minecraft-launcher-lib`,
-`requests`, `pillow`, `pypresence`), cài PyInstaller, rồi đóng gói
-`arch_laucher.py` thành **một file `dist/ArchClient.exe` duy nhất**, nhúng
-sẵn icon + banner bên trong.
-
-Gửi `dist/ArchClient.exe` cho người dùng (kèm `img/` và `client/` nếu
-muốn ghi đè/tuỳ biến) — họ chỉ cần double-click:
-
-- Không cần cài Python, không cần `pip install` gì cả.
-- Không cần cài Java thủ công — launcher tự phát hiện thiếu Java 21 và tự
-  tải Eclipse Temurin (Adoptium) về, giải nén, dùng luôn.
-- UI và toàn bộ tính năng (4 tab, cài Fabric, đăng nhập Microsoft, tối ưu
-  FPS, console, shortcut Desktop/Start Menu...) giữ nguyên như bản chạy
-  bằng source.
-
-## Contributing
-
-Personal repo, no formal contribution process yet. If you find a bug or
-have an idea for improvement, feel free to open an issue describing:
-your OS, Python version, and the log/traceback if it crashed — much
-easier to debug than a description alone.
-
-## License
-
-This software is **free for personal, non-commercial use**. You're
-allowed to download, modify, and redistribute it for free. You are
-**not** allowed to sell it, rent it, repackage it for profit, or use it
-for any commercial purpose in any form without prior written consent
-from the author. See the [`LICENSE`](LICENSE) file for details.
-
-Note: this license only applies to the launcher's code (`arch_client.py`).
-Third-party mods the launcher downloads (Sodium, Lithium, Iris, Fabric
-API...) retain their original authors' licenses — the launcher does not
-own and grants no additional rights over those files.
+Phần mềm này **miễn phí cho mục đích cá nhân, phi thương mại**. Được
+phép tải về, chỉnh sửa, chia sẻ lại miễn phí. **Không được** bán, cho
+thuê, đóng gói lại để kiếm lời, hoặc dùng cho mục đích thương mại dưới
+bất kỳ hình thức nào nếu chưa được tác giả đồng ý bằng văn bản. Xem chi
+tiết trong file [`LICENSE`](LICENSE).
 
 ## Credits
 
-Thanks to the open-source projects Arch Client relies on:
+Cảm ơn các dự án mã nguồn mở mà Arch Client sử dụng:
 [Fabric](https://fabricmc.net/),
 [minecraft-launcher-lib](https://github.com/JakobDev/minecraft-launcher-lib),
-[ttkbootstrap](https://ttkbootstrap.readthedocs.io/), and all the authors
-of the FPS optimization mods listed above on
-[Modrinth](https://modrinth.com/).
+[ttkbootstrap](https://ttkbootstrap.readthedocs.io/), cùng các tác giả bộ
+mod tối ưu FPS liệt kê ở trên trên [Modrinth](https://modrinth.com/).
 
 ---
 
