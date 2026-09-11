@@ -1,0 +1,47 @@
+name: Build EXE
+
+# File .exe Windows phải build trên máy Windows thật (PyInstaller không
+# cross-compile từ Linux/Mac ra .exe được) -> workflow này tự chạy trên
+# runner "windows-latest" của GitHub, không cần bạn có máy Windows.
+#
+# Lấy file .exe sau khi chạy xong: tab Actions -> chọn lần chạy mới nhất
+# -> mục Artifacts -> tải "ArchClient-windows". Push kèm tag "v*" sẽ tự
+# tạo Release đính kèm sẵn ArchClient.exe để tải trực tiếp.
+
+on:
+  push:
+    branches: [ main, Windows ]
+    tags: [ "v*" ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build ArchClient.exe
+        run: python build_windows.py
+
+      - name: Gói kèm img/ (và client/ nếu có)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          Copy-Item dist\ArchClient.exe release\
+          if (Test-Path img)    { Copy-Item img    release\img    -Recurse }
+          if (Test-Path client) { Copy-Item client release\client -Recurse }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArchClient-windows
+          path: release/**
+
+      - name: Tạo GitHub Release (chỉ khi push tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ArchClient.exe
