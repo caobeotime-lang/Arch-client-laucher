@@ -711,6 +711,8 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # Minecraft 1.20.5+ (bao gồm 1.21.x) yêu cầu tối thiểu Java 21 để chạy.
 JAVA_MAJOR_REQUIRED = 21
+# Các bản Java người dùng có thể tự chọn để cài (21 = tối thiểu, 26 = mới nhất).
+JAVA_VERSION_CHOICES = [str(v) for v in range(21, 27)]
 JRE_DIR = CONFIG_DIR / "jre"
 
 OPTIMIZATION_MODS = {
@@ -749,6 +751,7 @@ def default_config():
         "auto_install_shortcuts": True,
         "mc_version": MC_VERSION,
         "lang": "auto",  # auto | vi | en
+        "java_major": JAVA_MAJOR_REQUIRED,  # bản Java sẽ tự cài: 21..26
     }
 
 
@@ -1531,6 +1534,18 @@ class App(tb.Window):
         self.java_status_lbl = tb.Label(java_row, text="☕ Chưa kiểm tra Java",
                                           bootstyle="secondary", font=("", 9))
         self.java_status_lbl.pack(side="left")
+
+        tb.Label(java_row, text="  Bản cần cài:", bootstyle="secondary").pack(
+            side="left", padx=(12, 4))
+        self.java_major_var = tk.StringVar(
+            value=str(self.cfg.get("java_major", JAVA_MAJOR_REQUIRED)))
+        self.java_major_combo = tb.Combobox(
+            java_row, textvariable=self.java_major_var, values=JAVA_VERSION_CHOICES,
+            width=4, bootstyle="primary", state="readonly",
+        )
+        self.java_major_combo.pack(side="left")
+        self.java_major_combo.bind("<<ComboboxSelected>>", self._on_java_major_changed)
+
         tb.Button(java_row, text="⬇ Kiểm tra / Cài Java tự động", bootstyle="info-outline",
                    command=self.install_java_thread).pack(side="left", padx=(12, 0))
 
@@ -1710,17 +1725,31 @@ class App(tb.Window):
     def install_java_thread(self):
         threading.Thread(target=self._install_java_auto, daemon=True).start()
 
+    def _on_java_major_changed(self, event=None):
+        try:
+            self.cfg["java_major"] = int(self.java_major_var.get())
+            save_config(self.cfg)
+            self.log(f"☕ Sẽ cài OpenJDK {self.cfg['java_major']} ở lần bấm cài tiếp theo.")
+        except Exception:
+            pass
+
     def _install_java_auto(self):
         try:
+            # Bản Java người dùng chọn trong Settings (21-26), mặc định = tối thiểu bắt buộc.
+            try:
+                target_major = int(self.java_major_var.get())
+            except Exception:
+                target_major = int(self.cfg.get("java_major", JAVA_MAJOR_REQUIRED))
+
             self.set_status("Đang cài Java...", "inverse-warning")
             self._set_java_status("☕ Đang cài đặt...", "warning")
-            self.log(f"☕ Bắt đầu cài OpenJDK {JAVA_MAJOR_REQUIRED}...")
+            self.log(f"☕ Bắt đầu cài OpenJDK {target_major}...")
 
             # Bước 1 (chỉ Linux): thử qua trình quản lý gói hệ thống trước —
             # nhanh hơn, cập nhật được qua hệ thống, phù hợp CachyOS/Arch/Debian/Ubuntu.
             if OS_INFO.get("system") == "Linux" and OS_INFO.get("pkg_manager"):
                 self.log(f"  → Thử cài qua trình quản lý gói ({OS_INFO['pkg_manager']})...")
-                if install_java_via_pkg_manager(OS_INFO, JAVA_MAJOR_REQUIRED):
+                if install_java_via_pkg_manager(OS_INFO, target_major):
                     exe = shutil.which("java")
                     ver = get_java_version(exe) if exe else None
                     if exe and ver and ver >= JAVA_MAJOR_REQUIRED:
@@ -1746,18 +1775,18 @@ class App(tb.Window):
                 self.set_status("Lỗi", "inverse-danger")
                 return
 
-            url, ext = adoptium_download_info(JAVA_MAJOR_REQUIRED)
+            url, ext = adoptium_download_info(target_major)
             if not url:
                 self.log(f"❌ Không hỗ trợ tự động cài Java trên hệ điều hành/kiến trúc này "
-                          f"({OS_INFO.get('pretty')}). Vui lòng cài Java {JAVA_MAJOR_REQUIRED}+ thủ công "
+                          f"({OS_INFO.get('pretty')}). Vui lòng cài Java {target_major} thủ công "
                           "rồi chọn file java trong mục Cài đặt.")
                 self._set_java_status("☕ Cần cài Java thủ công", "danger")
                 self.set_status("Lỗi", "inverse-danger")
                 return
 
             JRE_DIR.mkdir(parents=True, exist_ok=True)
-            archive_path = JRE_DIR / f"openjdk{JAVA_MAJOR_REQUIRED}.{ext}"
-            self.log(f"⬇ Đang tải OpenJDK {JAVA_MAJOR_REQUIRED} (Eclipse Temurin)... "
+            archive_path = JRE_DIR / f"openjdk{target_major}.{ext}"
+            self.log(f"⬇ Đang tải OpenJDK {target_major} (Eclipse Temurin)... "
                       "có thể mất vài phút tuỳ tốc độ mạng.")
             download_file(url, archive_path, log_fn=self.log)
 
@@ -1774,7 +1803,7 @@ class App(tb.Window):
                 except Exception:
                     pass
 
-            ver = get_java_version(java_exe) or JAVA_MAJOR_REQUIRED
+            ver = get_java_version(java_exe) or target_major
             self.java_var.set(str(java_exe))
             self.cfg["java_path"] = str(java_exe)
             save_config(self.cfg)
@@ -2483,13 +2512,29 @@ class App(tb.Window):
         try:
             self.set_status("Đang cài Fabric...", "inverse-warning")
             self.mc_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"⏳ Đang cài Fabric Loader cho Minecraft {self.mc_version}...")
+
+            # Trước đây gọi mll.fabric.install_fabric() không truyền java=...,
+            # nên lib tự gọi lệnh "java" trơn qua PATH — nếu Windows chưa có
+            # Java trong PATH thì subprocess báo FileNotFoundError (WinError 2).
+            # Giờ resolve đúng java_path đã cấu hình (hoặc bản Java tự tải) rồi
+            # truyền thẳng vào, không phụ thuộc PATH của Windows nữa.
+            java_exe = resolve_java_path(self.java_var.get())
+            if not java_exe:
+                self.log("❌ Không tìm thấy Java. Vào tab Cài đặt, bấm "
+                          "'⬇ Kiểm tra / Cài Java tự động' trước khi cài Fabric.")
+                self.set_status("Lỗi", "inverse-danger")
+                return
+
+            self.log(f"⏳ Đang cài Fabric Loader cho Minecraft {self.mc_version} "
+                      f"(dùng Java: {java_exe})...")
             callback = {
                 "setStatus": lambda text: self.log(f"  {text}"),
                 "setProgress": lambda value: None,
                 "setMax": lambda value: None,
             }
-            mll.fabric.install_fabric(self.mc_version, str(self.mc_dir), callback=callback)
+            mll.fabric.install_fabric(
+                self.mc_version, str(self.mc_dir), callback=callback, java=java_exe
+            )
             self.log("✅ Cài Fabric thành công!")
             self.set_status("Sẵn sàng")
         except Exception as e:
@@ -2649,22 +2694,106 @@ class App(tb.Window):
                              encoding="utf-8")
         self.log(f"✅ Đã cập nhật {opt_path} với thiết lập tối ưu FPS.")
 
+    def _modrinth_version_list(self, slug):
+        """Lấy danh sách bản của 1 mod Modrinth khớp self.mc_version + Fabric,
+        sắp xếp mới nhất trước (API trả sẵn theo thứ tự này)."""
+        api = (f"https://api.modrinth.com/v2/project/{slug}/version"
+               f'?loaders=["fabric"]&game_versions=["{self.mc_version}"]')
+        r = requests.get(api, timeout=15, headers={"User-Agent": "ArchClient/2.0"})
+        r.raise_for_status()
+        return r.json()
+
+    def _modrinth_project_slug(self, project_id):
+        """Đổi project_id (vd trong 'dependencies') thành slug (vd 'sodium')."""
+        r = requests.get(f"https://api.modrinth.com/v2/project/{project_id}",
+                          timeout=15, headers={"User-Agent": "ArchClient/2.0"})
+        r.raise_for_status()
+        return r.json().get("slug", project_id)
+
+    def _download_modrinth_version(self, slug, version_obj, mods_dir):
+        """Tải đúng 1 bản (version_obj) của mod về mods_dir, xoá bản .jar cũ
+        cùng mod trước đó để tránh 2 bản song song gây xung đột."""
+        file_info = version_obj["files"][0]
+        dest = mods_dir / file_info["filename"]
+        for old in mods_dir.glob("*.jar"):
+            if slug in old.name.lower() and old.name != file_info["filename"]:
+                old.unlink(missing_ok=True)
+        self.log(f"  ⬇ Đang tải {slug} (MC {self.mc_version})...")
+        urllib.request.urlretrieve(file_info["url"], dest)
+        self.log(f"  ✅ Đã tải: {file_info['filename']}")
+
+    def _sync_sodium_for_iris(self, iris_version_obj, mods_dir):
+        """Iris chỉ chạy đúng với 1 khoảng bản Sodium nhất định. Nếu launcher
+        tải Sodium 'mới nhất' một cách độc lập, có thể vô tình chọn bản Sodium
+        mới hơn bản Iris đang hỗ trợ → mixin conflict → crash khi vào game.
+        Hàm này đọc dependency 'sodium' mà chính bản Iris đang tải yêu cầu,
+        rồi ép cài đúng bản đó (đè lên bản Sodium 'mới nhất' đã tải lệch)."""
+        try:
+            required_dep = None
+            for dep in iris_version_obj.get("dependencies", []):
+                if dep.get("dependency_type") != "required":
+                    continue
+                pid = dep.get("project_id")
+                if not pid:
+                    continue
+                try:
+                    pslug = self._modrinth_project_slug(pid)
+                except Exception:
+                    pslug = pid
+                if pslug == "sodium":
+                    required_dep = dep
+                    break
+
+            if not required_dep:
+                self.log("  ⚠ Không đọc được yêu cầu Sodium của Iris — giữ bản Sodium hiện có.")
+                return
+
+            version_id = required_dep.get("version_id")
+            if version_id:
+                # Iris ghim thẳng version_id → dùng đúng bản này, chắc chắn khớp.
+                r = requests.get(f"https://api.modrinth.com/v2/version/{version_id}",
+                                  timeout=15, headers={"User-Agent": "ArchClient/2.0"})
+                r.raise_for_status()
+                sodium_version_obj = r.json()
+            else:
+                # Iris chỉ ghi "cần Sodium" mà không ghim version cụ thể → chọn
+                # bản Sodium công bố GẦN NHẤT nhưng KHÔNG MUỘN HƠN bản Iris này,
+                # để tránh vồ bản Sodium mới hơn mà Iris chưa kịp hỗ trợ.
+                sodium_versions = self._modrinth_version_list("sodium")
+                iris_date = iris_version_obj.get("date_published", "")
+                candidates = [v for v in sodium_versions
+                              if v.get("date_published", "") <= iris_date]
+                sodium_version_obj = candidates[0] if candidates else (
+                    sodium_versions[0] if sodium_versions else None)
+
+            if not sodium_version_obj:
+                self.log("  ⚠ Không tìm được bản Sodium khớp với Iris.")
+                return
+
+            self._download_modrinth_version("sodium", sodium_version_obj, mods_dir)
+            self.log("  🔧 Đã đồng bộ Sodium theo đúng bản Iris yêu cầu (tránh crash do lệch version).")
+        except Exception as e:
+            self.log(f"  ❌ Lỗi đồng bộ Sodium/Iris: {e}")
+            write_error_log("Đồng bộ Sodium/Iris", exc=e)
+
     def _download_modrinth_mod(self, slug):
-        """Tải 1 mod từ Modrinth khớp self.mc_version + Fabric. Trả về True/False."""
+        """Tải 1 mod từ Modrinth khớp self.mc_version + Fabric. Trả về True/False.
+        Với 'iris', luôn kiểm tra & ép đúng bản Sodium tương thích sau khi tải."""
         if requests is None:
             self.log("⚠ Thiếu 'requests', bỏ qua tải mod tự động.")
             return False
         mods_dir = self.mc_dir / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
-        if any(slug in fp.name.lower() for fp in mods_dir.glob("*.jar")):
+        already = any(slug in fp.name.lower() for fp in mods_dir.glob("*.jar"))
+
+        # Mod khác Iris: nếu đã có thì bỏ qua như trước. Iris thì luôn kiểm tra
+        # lại Sodium dù đã có file, vì bản Sodium hiện tại có thể đang lệch.
+        if slug != "iris" and already:
             self.log(f"  ⏭ {slug}: đã có, bỏ qua.")
             return True
+
         try:
-            api = (f"https://api.modrinth.com/v2/project/{slug}/version"
-                   f'?loaders=["fabric"]&game_versions=["{self.mc_version}"]')
-            r = requests.get(api, timeout=15)
-            r.raise_for_status()
-            versions = r.json()
+            versions = self._modrinth_version_list(slug)
             if not versions:
                 msg = self.LANG.get(
                     "no_mod_for_ver",
@@ -2672,11 +2801,18 @@ class App(tb.Window):
                 ).format(ver=self.mc_version)
                 self.log(f"  ⚠ {slug}: {msg}")
                 return False
-            file_info = versions[0]["files"][0]
-            dest = mods_dir / file_info["filename"]
-            self.log(f"  ⬇ Đang tải {slug} (MC {self.mc_version})...")
-            urllib.request.urlretrieve(file_info["url"], dest)
-            self.log(f"  ✅ Đã tải: {file_info['filename']}")
+
+            chosen = versions[0]
+
+            if slug == "iris":
+                if not already:
+                    self._download_modrinth_version("iris", chosen, mods_dir)
+                else:
+                    self.log("  ⏭ iris: đã có, kiểm tra lại bản Sodium khớp...")
+                self._sync_sodium_for_iris(chosen, mods_dir)
+                return True
+
+            self._download_modrinth_version(slug, chosen, mods_dir)
             return True
         except Exception as e:
             self.log(f"  ❌ Lỗi tải {slug}: {e}")
