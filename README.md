@@ -59,8 +59,17 @@ it, builds the `.minecraft` folder structure, and comes with a one-click
   timestamped `.txt` file in
   `~/.config/arch-client-launcher/error_logs/`, with a full traceback —
   never a silent crash.
-- **Multi-language (VI/EN)** — auto-selected based on your location via
-  IP, falling back to system locale if there's no internet connection.
+- **Built-in content browser** — search Modrinth for mods, resource packs
+  and shaders, each row showing the project's icon, author, download count
+  and description. Downloads land in `mods/`, `resourcepacks/` or
+  `shaderpacks/` automatically.
+- **Real browser behaviour** — a smart address bar (type a URL to open it,
+  type anything else to search) plus a search-engine picker: DuckDuckGo,
+  Google, Bing, Startpage, Brave, YouTube, Modrinth and CurseForge. Known
+  tracker domains and tracking query parameters are stripped on the way.
+- **Fully bilingual UI (VI/EN)** — every tab, button, label and status
+  message is translated; auto-selected from your IP, with a system-locale
+  fallback and a manual override in Settings.
 - **Auto-adds a bundled client mod** — if the launcher ships with a
   `client/` folder containing a `.jar` file, it's automatically copied
   into `mods/` if missing or outdated.
@@ -122,6 +131,7 @@ The main window is split into 4 tabs:
 | 📊 Overview | Choose the `.minecraft` folder, view the list of mod/resourcepack/shaderpack/schematic files currently installed. |
 | ⚙️ Settings | Auto-check/install Java, log in with Microsoft, adjust RAM allocated to the game. |
 | 🚀 Optimize FPS | One click to write optimized FPS settings + download the selected performance mod set. |
+| 🌐 Browser / Mods | Search Modrinth for **mods, resource packs and shaders** with thumbnails, download straight into the right folder, or browse the web with a built-in address bar and a search-engine picker (DuckDuckGo, Google, Bing, Startpage, Brave, YouTube). |
 | 🖥️ Console | Watch live logs while the game runs, clear the console, save logs to a file. |
 
 The footer always has 2 fixed buttons: **⬇ Install / Update Fabric**
@@ -161,35 +171,57 @@ Missing `pypresence` — not required, the launcher still works fine, you
 just lose the Discord status feature. Install it with
 `pip install pypresence --break-system-packages` if you want to enable it.
 
-## Build bản .exe tối ưu cho Windows (không cần Python / pip thủ công)
+## Building the Windows `.exe` (no manual Python / pip needed)
 
-Bản `.exe` đóng gói cũ trên Windows bị lỗi "không tải được thư viện" vì nó
-cố tự `pip install` bằng **chính file `.exe`** — mà `.exe` không có lệnh
-`-m pip` nên luôn thất bại. Launcher giờ tự nhận diện khi đang chạy dưới
-dạng `.exe` đóng gói (`FROZEN`) và bỏ qua hoàn toàn bước pip lúc runtime,
-vì mọi thư viện đã được nhúng sẵn ngay lúc build.
-
-Trên máy **có Python** (chỉ máy dùng để build cần Python, người nhận file
-`.exe` thì không cần), chạy:
+On a machine **with Python** (only the build machine needs it — people
+receiving the `.exe` do not), run:
 
 ```bash
-python build_windows.py
+python build_windows.py            # recommended: onedir + ArchClient-windows.zip
+python build_windows.py --onefile  # single .exe (more likely to be AV-flagged)
 ```
 
-Script này tự cài đủ thư viện (`ttkbootstrap`, `minecraft-launcher-lib`,
-`requests`, `pillow`, `pypresence`), cài PyInstaller, rồi đóng gói
-`arch_laucher.py` thành **một file `dist/ArchClient.exe` duy nhất**, nhúng
-sẵn icon + banner bên trong.
+The script installs every dependency (`ttkbootstrap`, `minecraft-launcher-lib`,
+`requests`, `pillow`, `pypresence`, `tkinterweb`, `pywebview`), installs
+PyInstaller, generates an embedded version resource + an `asInvoker`
+manifest, and packages everything into `dist/ArchClient/` (zipped as
+`dist/ArchClient-windows.zip`).
 
-Gửi `dist/ArchClient.exe` cho người dùng (kèm `img/` và `client/` nếu
-muốn ghi đè/tuỳ biến) — họ chỉ cần double-click:
+Send the `.zip` to users — they unzip it and double-click `ArchClient.exe`:
 
-- Không cần cài Python, không cần `pip install` gì cả.
-- Không cần cài Java thủ công — launcher tự phát hiện thiếu Java 21 và tự
-  tải Eclipse Temurin (Adoptium) về, giải nén, dùng luôn.
-- UI và toàn bộ tính năng (4 tab, cài Fabric, đăng nhập Microsoft, tối ưu
-  FPS, console, shortcut Desktop/Start Menu...) giữ nguyên như bản chạy
-  bằng source.
+- No Python, no `pip install`.
+- No manual Java install — the launcher detects a missing Java 21 and
+  downloads Eclipse Temurin (Adoptium) on its own.
+- Same UI and features as running from source.
+
+The launcher detects when it is running as a frozen `.exe` (`FROZEN`) and
+skips the runtime pip step entirely, since every library is embedded at
+build time.
+
+## Windows Defender flags the .exe — why, and how it's fixed
+
+Older builds got tagged as `Trojan:Win32/Wacatac.B!ml`. That is a false
+positive, and it had four causes:
+
+| Cause | Fix |
+|---|---|
+| `--onefile` unpacks tens of MB into `%TEMP%` then executes from there — textbook dropper behaviour for Defender's ML heuristics | Default build is now `--onedir` (a folder + DLLs, no self-extraction) |
+| The `.exe` carried no version resource, so it looked like anonymous software | `build_windows.py` generates `version_info.txt` (CompanyName, ProductName, FileVersion) and passes `--version-file` |
+| UPX compression looks like a packer | `--noupx` (already in place) |
+| Not code-signed, so SmartScreen warns on first run | Needs a paid certificate. `--sign-self` adds a self-signed signature, which helps some engines but not SmartScreen |
+
+If a build still gets flagged:
+
+1. Use the `--onedir` build (the default) rather than `--onefile`.
+2. Report the false positive at
+   <https://www.microsoft.com/en-us/wdsi/filesubmission> — Microsoft usually
+   clears it within a few days, for everyone.
+3. As a stopgap, users can add an exclusion:
+   **Windows Security → Virus & threat protection → Manage settings →
+   Exclusions**.
+4. Note that the launcher downloads a JRE and mod `.jar` files at runtime,
+   which some behavioural engines also dislike. That behaviour is genuine and
+   intentional.
 
 ## Contributing
 
