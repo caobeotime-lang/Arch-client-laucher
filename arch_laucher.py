@@ -31,7 +31,23 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-        
+
+# ==========================================================================
+# FROZEN: True khi launcher đã được đóng gói thành 1 file chạy sẵn
+# (PyInstaller onefile / AppImage). Khi đó sys.executable là chính file
+# nhị phân đó, KHÔNG phải python thật, nên không được gọi
+# "sys.executable -m pip install ..." (sẽ chỉ tự mở lại app). Mọi thư viện
+# bắt buộc đã được nhúng sẵn lúc build (xem build_linux.py).
+FROZEN = bool(getattr(sys, "frozen", False))
+
+# Thư mục gốc của app — dùng để tìm img/ đặt cạnh file chạy.
+# AppImage đặt nội dung ở $APPDIR; PyInstaller giải nén vào sys._MEIPASS
+# (thư mục tạm, sẽ bị xoá) nên chỉ dùng làm bản dự phòng.
+if FROZEN:
+    EXE_DIR = Path(os.environ.get("APPDIR") or Path(sys.executable).resolve().parent)
+else:
+    EXE_DIR = Path(__file__).resolve().parent
+
 # ==========================================================================
 # BOOTSTRAP: nhận diện hệ điều hành + tự cài gói còn thiếu
 # ==========================================================================
@@ -179,10 +195,32 @@ def detect_os():
             info["pkg_manager"] = "pacman"
         elif distro_id in ("debian", "ubuntu") or "debian" in distro_like or "ubuntu" in distro_like:
             info["pkg_manager"] = "apt"
+        elif distro_id in ("fedora", "rhel", "centos", "nobara") or "fedora" in distro_like or "rhel" in distro_like:
+            info["pkg_manager"] = "dnf"
+        elif distro_id in ("opensuse", "opensuse-tumbleweed", "opensuse-leap") or "suse" in distro_like:
+            info["pkg_manager"] = "zypper"
+        elif distro_id == "void" or shutil.which("xbps-install"):
+            info["pkg_manager"] = "xbps"
+        elif distro_id == "alpine" or shutil.which("apk"):
+            info["pkg_manager"] = "apk"
         elif shutil.which("pacman"):
             info["pkg_manager"] = "pacman"
         elif shutil.which("apt-get") or shutil.which("apt"):
             info["pkg_manager"] = "apt"
+        elif shutil.which("dnf"):
+            info["pkg_manager"] = "dnf"
+        elif shutil.which("zypper"):
+            info["pkg_manager"] = "zypper"
+
+        # Nhận diện thêm các bản Linux "đóng gói cứng" — nơi KHÔNG nên
+        # sudo cài gói hệ thống (SteamOS, Bazzite, Silverblue... dùng
+        # rootfs chỉ đọc; Flatpak/Snap thì càng không).
+        info["immutable"] = bool(
+            distro_id in ("steamos", "bazzite", "silverblue", "kinoite", "nixos")
+            or Path("/run/ostree-booted").exists()
+            or os.environ.get("FLATPAK_ID")
+            or os.environ.get("SNAP")
+        )
 
     else:
         info["pretty"] = system or "Không xác định"
@@ -230,8 +268,24 @@ def ensure_system_packages(osinfo):
             _bprint("⚠ Không nhận diện được trình quản lý gói (pacman/apt).")
             _bprint("  Hãy tự cài thủ công: gói 'tk' (Arch) hoặc 'python3-tk' (Debian/Ubuntu).")
 
-    # WebKitGTK / GI — cần cho pywebview + một số backend trình duyệt nhúng trên Linux.
-    _bprint("⏳ Kiểm tra gói trình duyệt nhúng (WebKit)...")
+    # WebKitGTK / GI — cần cho pywebview + một số backend trình duyệt nhúng.
+    # KHÁC bản Windows: ở đây chỉ hỏi sudo khi THỰC SỰ thiếu, vì bản cũ gọi
+    # pacman/apt ở MỌI lần mở app -> lần nào cũng bắt nhập mật khẩu sudo.
+    if osinfo.get("immutable"):
+        _bprint("ℹ Distro dạng immutable (SteamOS/Silverblue/Flatpak…) — bỏ qua cài gói hệ thống.")
+        return
+    try:
+        import gi  # noqa: F401
+        gi.require_version("WebKit2", "4.1")
+        return
+    except Exception:
+        try:
+            import gi  # noqa: F401
+            gi.require_version("WebKit2", "4.0")
+            return
+        except Exception:
+            pass
+    _bprint("⏳ Thiếu WebKitGTK cho trình duyệt nhúng — đang cài...")
     if pm == "pacman":
         _run(["pacman", "-Sy", "--needed", "--noconfirm",
               "webkit2gtk-4.1", "python-gobject"], use_sudo=True) or             _run(["pacman", "-Sy", "--needed", "--noconfirm",
@@ -246,6 +300,13 @@ def ensure_system_packages(osinfo):
 
 
 def _pip_install(packages):
+    if FROZEN:
+        # Đang chạy dưới dạng .exe đã đóng gói — sys.executable là chính
+        # file .exe, KHÔNG phải python.exe, nên "-m pip" sẽ không chạy được
+        # (đây chính là lỗi "không tải được thư viện" trên bản Windows cũ).
+        # Không còn cần thiết vì mọi gói bắt buộc đã được nhúng sẵn lúc build.
+        _bprint("  ↳ Bản .exe đóng gói sẵn — bỏ qua bước pip install (đã nhúng sẵn thư viện).")
+        return False
     base = [sys.executable, "-m", "pip", "install"] + packages
     _bprint("  $ " + " ".join(base))
     result = subprocess.run(base, capture_output=True, text=True)
@@ -259,8 +320,17 @@ def _pip_install(packages):
         result2 = subprocess.run(base2, capture_output=True, text=True)
         if result2.returncode == 0:
             return True
-        _bprint(result2.stdout)
-        _bprint(result2.stderr)
+        # Nhiều distro (Arch, Fedora, Debian 12+) khoá site-packages hệ thống.
+        # Cài vào ~/.local là cách sạch nhất, không cần sudo, không đụng
+        # gói của pacman/apt.
+        base3 = base + ["--user", "--break-system-packages"]
+        _bprint("  ↳ Thử lại kiểu cài cho riêng người dùng (~/.local)")
+        _bprint("  $ " + " ".join(base3))
+        result3 = subprocess.run(base3, capture_output=True, text=True)
+        if result3.returncode == 0:
+            return True
+        _bprint(result3.stdout)
+        _bprint(result3.stderr)
         return False
     _bprint(combined)
     return False
@@ -275,6 +345,16 @@ def ensure_python_packages():
         except ImportError:
             missing.append(pip_name)
     if missing:
+        if FROZEN:
+            # Không nên xảy ra: bản .exe build đúng đã nhúng sẵn mọi gói bắt
+            # buộc. Nếu vẫn thiếu, đây là lỗi khi build chứ người dùng không
+            # tự sửa bằng pip được (vì không có Python/pip trên máy họ).
+            _bprint(f"❌ Bản .exe này bị thiếu thư viện: {', '.join(missing)}.")
+            _bprint("   Đây là lỗi khi build .exe (chưa nhúng đủ thư viện) — "
+                     "hãy build lại bằng build_windows.py, không phải lỗi ở máy người dùng.")
+            write_error_log("Bootstrap — .exe thiếu thư viện đã nhúng",
+                             extra_text=f"Các gói còn thiếu: {', '.join(missing)}")
+            sys.exit(1)
         _bprint(f"⏳ Thiếu thư viện Python: {', '.join(missing)} — đang tự động cài đặt qua pip...")
         ok = _pip_install(missing)
         if ok:
@@ -384,6 +464,58 @@ BROWSER_QUICK = [
     ("Planet MC", "https://www.planetminecraft.com/resources/mods/?order=order_popularity"),
 ]
 
+# Công cụ tìm kiếm cho thanh địa chỉ (giống trình duyệt thật): gõ từ khoá
+# không phải URL -> tự chuyển thành truy vấn tìm kiếm của engine đang chọn.
+SEARCH_ENGINES = {
+    "DuckDuckGo": "https://duckduckgo.com/?q={q}",
+    "Google":     "https://www.google.com/search?q={q}",
+    "Bing":       "https://www.bing.com/search?q={q}",
+    "Startpage":  "https://www.startpage.com/sp/search?query={q}",
+    "Brave":      "https://search.brave.com/search?q={q}",
+    "Modrinth":   "https://modrinth.com/mods?q={q}",
+    "CurseForge": "https://www.curseforge.com/minecraft/search?class=mc-mods&search={q}",
+    "YouTube":    "https://www.youtube.com/results?search_query={q}",
+}
+DEFAULT_SEARCH_ENGINE = "DuckDuckGo"
+
+# Host của engine tìm kiếm: KHÔNG được coi là tracker, nếu không thì bấm tìm
+# kiếm sẽ bị chính bộ lọc chặn (bing.com/google nằm trong danh sách ads).
+SEARCH_ENGINE_HOSTS = {
+    "duckduckgo.com", "html.duckduckgo.com", "lite.duckduckgo.com",
+    "google.com", "www.google.com",
+    "bing.com", "www.bing.com",
+    "startpage.com", "www.startpage.com",
+    "search.brave.com", "brave.com",
+    "youtube.com", "www.youtube.com", "m.youtube.com",
+    "modrinth.com", "www.modrinth.com",
+    "curseforge.com", "www.curseforge.com",
+}
+
+
+def is_search_engine_url(url: str) -> bool:
+    host = _host_of(url)
+    return bool(host) and host in SEARCH_ENGINE_HOSTS
+
+
+def looks_like_url(text: str) -> bool:
+    """True nếu chuỗi trông như địa chỉ web; False nếu là từ khoá cần tìm."""
+    s = (text or "").strip()
+    if not s:
+        return False
+    if re.match(r"^[a-z][a-z0-9+.-]*://", s, re.I):
+        return True
+    if " " in s:
+        return False
+    if s.lower().startswith("localhost"):
+        return True
+    return bool(re.match(r"^[\w.-]+\.[a-z]{2,}([/:?#]|$)", s, re.I))
+
+
+def build_search_url(query: str, engine: str = DEFAULT_SEARCH_ENGINE) -> str:
+    from urllib.parse import quote_plus
+    tmpl = SEARCH_ENGINES.get(engine) or SEARCH_ENGINES[DEFAULT_SEARCH_ENGINE]
+    return tmpl.format(q=quote_plus((query or "").strip()))
+
 # Danh sách domain tracker / ads / telemetry — chặn khi điều hướng & strip tham số.
 TRACKER_DOMAINS = {
     "google-analytics.com", "googletagmanager.com", "googleadservices.com",
@@ -392,10 +524,10 @@ TRACKER_DOMAINS = {
     "scorecardresearch.com", "quantserve.com", "outbrain.com", "taboola.com",
     "hotjar.com", "mouseflow.com", "fullstory.com", "mixpanel.com",
     "segment.io", "segment.com", "amplitude.com", "sentry.io",
-    "newrelic.com", "nr-data.net", "clarity.ms", "bing.com",
+    "newrelic.com", "nr-data.net", "clarity.ms", "bat.bing.com",
     "ads.twitter.com", "analytics.twitter.com", "t.co",
     "adnxs.com", "advertising.com", "criteo.com", "pubmatic.com",
-    "moatads.com", "amazon-adsystem.com", "yandex.ru", "mc.yandex.ru",
+    "moatads.com", "amazon-adsystem.com", "mc.yandex.ru",
 }
 TRACKING_QUERY_KEYS = {
     "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
@@ -415,6 +547,9 @@ def _host_of(url: str) -> str:
 def is_tracker_url(url: str) -> bool:
     host = _host_of(url)
     if not host:
+        return False
+    # Engine tìm kiếm là đích người dùng chủ động mở -> luôn cho qua.
+    if host in SEARCH_ENGINE_HOSTS:
         return False
     for t in TRACKER_DOMAINS:
         if host == t or host.endswith("." + t):
@@ -472,9 +607,18 @@ ANTI_TRACKER_JS = r"""
 })();
 """
 
-APP_DIR = Path(__file__).resolve().parent
+APP_DIR = EXE_DIR  # thư mục chứa .exe (hoặc chứa .py khi chạy bằng source)
 ICON_PATH = APP_DIR / "img" / "icon.png"
 BANNER_PATH = APP_DIR / "img" / "banner.png"
+
+if FROZEN and (not ICON_PATH.exists() or not BANNER_PATH.exists()):
+    # img/ không được đặt cạnh .exe — dùng bản dự phòng đã nhúng sẵn bên
+    # trong .exe lúc build (PyInstaller giải nén vào sys._MEIPASS khi chạy).
+    _bundled_img_dir = Path(getattr(sys, "_MEIPASS", str(APP_DIR))) / "img"
+    if not ICON_PATH.exists() and (_bundled_img_dir / "icon.png").exists():
+        ICON_PATH = _bundled_img_dir / "icon.png"
+    if not BANNER_PATH.exists() and (_bundled_img_dir / "banner.png").exists():
+        BANNER_PATH = _bundled_img_dir / "banner.png"
 WEBSITE_URL = "https://archclient.netlify.app"
 
 
@@ -560,13 +704,16 @@ def load_banner_image(max_width=None, max_height=120):
 
 LANG_STRINGS = {
     "vi": {
+        # ---- khung chính ----
         "app_subtitle": "Minecraft {ver} · Fabric · Tối ưu FPS tối đa",
         "status_ready": "Sẵn sàng",
+        "status_error": "Lỗi",
+        "status_working": "Đang xử lý...",
         "tab_overview": "  📊 Tổng quan  ",
         "tab_settings": "  ⚙️ Cài đặt  ",
         "tab_optimize": "  🚀 Tối ưu FPS  ",
         "tab_log": "  🖥️ Console  ",
-        "tab_browser": "  Browser / Mods  ",
+        "tab_browser": "  🌐 Browser / Mods  ",
         "mc_dir_label": "Thư mục .minecraft:",
         "btn_choose": "Chọn...",
         "btn_install_fabric": "⬇ Cài / Cập nhật Fabric",
@@ -584,25 +731,125 @@ LANG_STRINGS = {
         "lang_auto": "Tự động (theo IP / quốc gia)",
         "lang_vi": "Tiếng Việt",
         "lang_en": "English",
+        "lang_hint": "Tự động = nhận diện theo IP (VN → Tiếng Việt).",
         "ver_title": "Phiên bản Minecraft",
         "ver_note": "Fabric + mod sẽ theo phiên bản đang chọn.",
         "no_mod_for_ver": "Không có bản mod cho phiên bản {ver} + Fabric.",
+        # ---- tab tổng quan ----
+        "ov_files_title": "Chi tiết file",
+        "ov_col_type": "Loại",
+        "ov_col_name": "Tên file",
+        # ---- tab cài đặt ----
+        "set_java": "Java",
+        "set_java_browse": "Chọn file...",
+        "set_java_unchecked": "☕ Chưa kiểm tra Java",
+        "set_java_target": "  Bản cần cài:",
+        "set_java_install": "⬇ Kiểm tra / Cài Java tự động",
+        "set_ram": "RAM cấp cho game",
+        "set_username": "Tên người chơi",
+        "set_client_id": "Azure client_id",
+        "set_login": "Login Microsoft",
+        "set_save": "💾 Lưu cài đặt",
+        # ---- tab tối ưu ----
+        "opt_title": "🚀 Tối ưu FPS / hiệu năng",
+        "opt_sub": "Ghi options.txt tối ưu + tải mod tối ưu còn thiếu từ Modrinth",
+        "opt_box": "Mod tối ưu hoá",
+        "opt_apply": "🚀 Áp dụng tối ưu FPS ngay",
+        # ---- tối ưu riêng cho Linux ----
+        "lin_box": "🐧 Tối ưu riêng cho Linux",
+        "lin_hw": "GPU: {gpu} · Phiên: {session} · CPU: {cores} nhân ({gov}) · RAM: {ram} MB (nên cấp {suggest} MB)",
+        "lin_scan": "🔍 Quét lại phần cứng",
+        "lin_save": "💾 Lưu tuỳ chọn Linux",
+        "lin_install_tools": "⬇ Cài gamemode / MangoHud",
+        "lin_missing": "  (chưa cài {cmd})",
+        "lin_saved": "✅ Đã lưu tuỳ chọn tối ưu Linux.",
+        "lin_gamemode": "gamemoderun — ép CPU/GPU về chế độ hiệu năng khi chơi",
+        "lin_mangohud": "MangoHud — hiện FPS / nhiệt độ ngay trong game",
+        "lin_glthread": "Threaded OpenGL (Mesa + NVIDIA) — thường thêm 5–20% FPS",
+        "lin_shader_cache": "Cache shader ra ổ cứng — vào game & load chunk nhanh hơn",
+        "lin_allocator": "Dùng jemalloc/mimalloc nếu có — JVM bớt phình RAM, bớt khựng",
+        "lin_thp": "Huge Pages + NUMA cho JVM — giảm giật khi GC",
+        "lin_dgpu": "Bắt buộc chạy bằng GPU rời (máy lai 2 GPU)",
+        "lin_no_vsync": "Tắt VSync ở tầng driver — giảm input lag",
+        "lin_wm_fix": "Vá cửa sổ trắng/trống trên i3 · sway · bspwm",
+        "lin_system_glfw": "Dùng GLFW của hệ thống — chạy Wayland mượt hơn",
+        "lin_high_priority": "Ưu tiên CPU cao hơn (nice -5)",
+        "lin_zgc": "Dùng ZGC thay G1 (chỉ nên bật khi cấp ≥ 8 GB RAM)",
+        "opt_running": "Đang tối ưu...",
+        # ---- tab browser ----
+        "br_tip": "Trình duyệt mod · tìm & tải Mod / Resource Pack / Shader · chặn tracker khi mở web",
+        "br_mode_store": "Kho nội dung (Modrinth)",
+        "br_mode_web": "Trang web",
+        "br_install_engine": "Cài engine browser",
+        "br_type_mod": "🧩 Mods",
+        "br_type_resourcepack": "🎨 Resource Packs",
+        "br_type_shader": "✨ Shaders",
+        "br_type_modpack": "📦 Modpacks",
+        "br_search_label": "Tìm:",
+        "br_btn_search": "Tìm",
+        "br_btn_download": "⬇ Tải mục đã chọn",
+        "br_btn_open_page": "Mở trang",
+        "br_hint": "Gõ từ khoá → Tìm → chọn một dòng → Tải. Ảnh minh hoạ tải nền, không làm chậm app.",
+        "br_col_icon": "Ảnh",
+        "br_col_name": "Tên",
+        "br_col_author": "Tác giả",
+        "br_col_downloads": "Lượt tải",
+        "br_col_desc": "Mô tả",
+        "br_searching": "Đang tìm «{q}» trên Modrinth…",
+        "br_found": "Tìm thấy {n} kết quả (MC {ver}) · chọn một dòng → Tải",
+        "br_empty": "Không có kết quả «{q}» cho MC {ver}",
+        "br_need_requests": "Thiếu thư viện requests",
+        "br_need_query": "Nhập từ khoá để tìm",
+        "br_select_first": "Chọn một mục trong danh sách trước",
+        "br_downloading": "Đang tải {name}…",
+        "br_downloaded": "✅ Đã tải {name} → thư mục {folder}",
+        "br_download_fail": "⚠ {name}: không có bản phù hợp MC {ver}",
+        "br_error_search": "Lỗi tìm kiếm: {err}",
+        "br_error_download": "Lỗi tải: {err}",
+        "br_search_engine": "Tìm bằng:",
+        "br_url_placeholder": "Nhập địa chỉ web hoặc từ khoá cần tìm…",
+        "br_btn_go": "Go",
+        "br_btn_web_search": "🔍 Tìm",
+        "br_private_window": "Cửa sổ riêng",
+        "br_home": "Home",
+        "br_engine_ok": "Engine nhúng OK · anti-tracker bật",
+        "br_engine_missing_title": "Chưa có engine trang web nhúng",
+        "br_engine_missing_body": (
+            "Tab «Kho nội dung» vẫn dùng được ngay (không cần WebKit).\n"
+            "Muốn xem trang web đầy đủ trong launcher: bấm «Cài engine browser» "
+            "rồi khởi động lại — hoặc dùng «Cửa sổ riêng» (hiển thị chuẩn nhất)."
+        ),
+        "br_open_secure": "Mở cửa sổ web an toàn",
+        "br_use_store": "Dùng Kho nội dung hoặc Cửa sổ riêng",
+        "br_blocked_tracker": "Đã chặn URL tracker",
+        "br_loading": "Đang tải · {host} · anti-tracker",
+        "br_loaded": "OK · {host} · đã chặn tracker",
+        "br_load_error": "Lỗi tải trang: {err}",
+        "br_no_engine": "Không có engine nhúng — bấm «Cửa sổ riêng» hoặc «Cài engine browser»",
+        "br_installing_engine": "Đang cài engine…",
+        "br_engine_installed": "Cài xong — thử tab Trang web",
+        "br_engine_partial": "Cài chưa đủ — dùng Kho nội dung",
+        # ---- console ----
+        "log_title": "🖥️  Console",
     },
     "en": {
+        # ---- main shell ----
         "app_subtitle": "Minecraft {ver} · Fabric · Max FPS optimization",
         "status_ready": "Ready",
+        "status_error": "Error",
+        "status_working": "Working...",
         "tab_overview": "  📊 Overview  ",
         "tab_settings": "  ⚙️ Settings  ",
         "tab_optimize": "  🚀 FPS Optimize  ",
         "tab_log": "  🖥️ Console  ",
-        "tab_browser": "  Browser / Mods  ",
+        "tab_browser": "  🌐 Browser / Mods  ",
         "mc_dir_label": ".minecraft folder:",
         "btn_choose": "Browse...",
         "btn_install_fabric": "⬇ Install / Update Fabric",
+        "btn_play": "▶  PLAY NOW",
+        "btn_website": "🌐 Website",
         "btn_clear_console": "🗑 Clear console",
         "btn_save_console": "💾 Save log as .txt",
-        "btn_play": "▶  PLAY",
-        "btn_website": "🌐 Website",
         "splash_detect": "Detecting location & language...",
         "splash_load": "Loading configuration...",
         "shortcut_title": "Desktop / Start Menu shortcut",
@@ -613,9 +860,134 @@ LANG_STRINGS = {
         "lang_auto": "Auto (by IP / country)",
         "lang_vi": "Vietnamese",
         "lang_en": "English",
+        "lang_hint": "Auto = detected from your IP (VN → Vietnamese).",
         "ver_title": "Minecraft version",
         "ver_note": "Fabric + mods follow the selected version.",
-        "no_mod_for_ver": "No mod build for version {ver} + Fabric.",
+        "no_mod_for_ver": "No build available for {ver} + Fabric.",
+        # ---- overview tab ----
+        "ov_files_title": "Installed files",
+        "ov_col_type": "Type",
+        "ov_col_name": "File name",
+        # ---- settings tab ----
+        "set_java": "Java",
+        "set_java_browse": "Browse...",
+        "set_java_unchecked": "☕ Java not checked yet",
+        "set_java_target": "  Version to install:",
+        "set_java_install": "⬇ Check / Auto-install Java",
+        "set_ram": "RAM allocated to the game",
+        "set_username": "Player name",
+        "set_client_id": "Azure client_id",
+        "set_login": "Sign in with Microsoft",
+        "set_save": "💾 Save settings",
+        # ---- optimize tab ----
+        "opt_title": "🚀 FPS / performance optimization",
+        "opt_sub": "Write a tuned options.txt + download the missing performance mods from Modrinth",
+        "opt_box": "Performance mods",
+        "opt_apply": "🚀 Apply FPS optimization now",
+        # ---- Linux-only tweaks ----
+        "lin_box": "🐧 Linux-only optimization",
+        "lin_hw": "GPU: {gpu} · Session: {session} · CPU: {cores} cores ({gov}) · RAM: {ram} MB (suggested {suggest} MB)",
+        "lin_scan": "🔍 Rescan hardware",
+        "lin_save": "💾 Save Linux tweaks",
+        "lin_install_tools": "⬇ Install gamemode / MangoHud",
+        "lin_missing": "  (not installed: {cmd})",
+        "lin_saved": "✅ Linux tweaks saved.",
+        "lin_gamemode": "gamemoderun — forces CPU/GPU into performance mode",
+        "lin_mangohud": "MangoHud — in-game FPS / temperature overlay",
+        "lin_glthread": "Threaded OpenGL (Mesa + NVIDIA) — usually 5–20% more FPS",
+        "lin_shader_cache": "On-disk shader cache — faster startup and chunk loading",
+        "lin_allocator": "Use jemalloc/mimalloc when present — less RAM, fewer stutters",
+        "lin_thp": "Huge Pages + NUMA for the JVM — smoother GC",
+        "lin_dgpu": "Force the discrete GPU (hybrid laptops)",
+        "lin_no_vsync": "Disable driver-level VSync — lower input lag",
+        "lin_wm_fix": "Fix blank windows on i3 · sway · bspwm",
+        "lin_system_glfw": "Use the system GLFW — better Wayland support",
+        "lin_high_priority": "Higher CPU priority (nice -5)",
+        "lin_zgc": "Use ZGC instead of G1 (only with ≥ 8 GB allocated)",
+        "opt_running": "Optimizing...",
+        # ---- browser tab ----
+        "br_tip": "Mod browser · search & download Mods / Resource Packs / Shaders · trackers blocked while browsing",
+        "br_mode_store": "Content store (Modrinth)",
+        "br_mode_web": "Web page",
+        "br_install_engine": "Install browser engine",
+        "br_type_mod": "🧩 Mods",
+        "br_type_resourcepack": "🎨 Resource Packs",
+        "br_type_shader": "✨ Shaders",
+        "br_type_modpack": "📦 Modpacks",
+        "br_search_label": "Search:",
+        "br_btn_search": "Search",
+        "br_btn_download": "⬇ Download selected",
+        "br_btn_open_page": "Open page",
+        "br_hint": "Type a keyword → Search → pick a row → Download. Thumbnails load in the background.",
+        "br_col_icon": "Icon",
+        "br_col_name": "Name",
+        "br_col_author": "Author",
+        "br_col_downloads": "Downloads",
+        "br_col_desc": "Description",
+        "br_searching": "Searching «{q}» on Modrinth…",
+        "br_found": "Found {n} results (MC {ver}) · pick a row → Download",
+        "br_empty": "No results for «{q}» on MC {ver}",
+        "br_need_requests": "Missing the requests library",
+        "br_need_query": "Type a keyword to search",
+        "br_select_first": "Select an item from the list first",
+        "br_downloading": "Downloading {name}…",
+        "br_downloaded": "✅ Downloaded {name} → {folder} folder",
+        "br_download_fail": "⚠ {name}: no build matching MC {ver}",
+        "br_error_search": "Search error: {err}",
+        "br_error_download": "Download error: {err}",
+        "br_search_engine": "Search with:",
+        "br_url_placeholder": "Enter a web address or a search keyword…",
+        "br_btn_go": "Go",
+        "br_btn_web_search": "🔍 Search",
+        "br_private_window": "Private window",
+        "br_home": "Home",
+        "br_engine_ok": "Embedded engine ready · anti-tracker on",
+        "br_engine_missing_title": "No embedded web engine yet",
+        "br_engine_missing_body": (
+            "The «Content store» tab works right away (no WebKit needed).\n"
+            "To view full web pages inside the launcher: click «Install browser engine» "
+            "and restart — or use «Private window» (best rendering)."
+        ),
+        "br_open_secure": "Open secure web window",
+        "br_use_store": "Use the Content store or a Private window",
+        "br_blocked_tracker": "Tracker URL blocked",
+        "br_loading": "Loading · {host} · anti-tracker",
+        "br_loaded": "OK · {host} · trackers blocked",
+        "br_load_error": "Page load error: {err}",
+        "br_no_engine": "No embedded engine — click «Private window» or «Install browser engine»",
+        "br_installing_engine": "Installing engine…",
+        "br_engine_installed": "Done — try the Web page tab",
+        "br_engine_partial": "Install incomplete — use the Content store",
+        # ---- console ----
+        "log_title": "🖥️  Console",
+    },
+}
+
+# Mô tả mod tối ưu hoá theo ngôn ngữ (dùng cho tab Tối ưu FPS).
+MOD_DESCRIPTIONS = {
+    "vi": {
+        "sodium": "Render engine siêu nhanh — bắt buộc cho FPS cao",
+        "lithium": "Tối ưu logic game, giảm tick lag",
+        "starlight": "Tối ưu ánh sáng, giảm lag chunk",
+        "ferrite-core": "Giảm RAM sử dụng",
+        "krypton": "Tối ưu mạng, giảm lag khi chơi server",
+        "lazydfu": "Giảm thời gian khởi động game",
+        "iris": "Hỗ trợ shader, tương thích Sodium",
+        "modernfix": "Giảm RAM + tăng tốc thời gian khởi động",
+        "entityculling": "Bỏ qua render entity ngoài tầm nhìn — tăng FPS mạnh",
+        "immediatelyfast": "Tối ưu vẽ UI/immediate rendering, tăng FPS thêm",
+    },
+    "en": {
+        "sodium": "Blazing-fast render engine — required for high FPS",
+        "lithium": "Optimizes game logic, cuts tick lag",
+        "starlight": "Rewrites lighting, removes chunk lag",
+        "ferrite-core": "Lowers memory usage",
+        "krypton": "Network optimizations, less lag on servers",
+        "lazydfu": "Much faster game startup",
+        "iris": "Shader support, works with Sodium",
+        "modernfix": "Less RAM + faster startup times",
+        "entityculling": "Skips rendering entities you can't see — big FPS gain",
+        "immediatelyfast": "Speeds up UI / immediate-mode rendering",
     },
 }
 
@@ -668,6 +1040,8 @@ CONFIG_FILE = CONFIG_DIR / "config.json"
 
 # Minecraft 1.20.5+ (bao gồm 1.21.x) yêu cầu tối thiểu Java 21 để chạy.
 JAVA_MAJOR_REQUIRED = 21
+# Các bản Java người dùng có thể tự chọn để cài (21 = tối thiểu, 26 = mới nhất).
+JAVA_VERSION_CHOICES = [str(v) for v in range(21, 27)]
 JRE_DIR = CONFIG_DIR / "jre"
 
 OPTIMIZATION_MODS = {
@@ -699,6 +1073,357 @@ CATEGORIES = [
 
 
 
+# ==========================================================================
+# TỐI ƯU RIÊNG CHO LINUX
+# ==========================================================================
+# Phần này là điểm khác biệt chính so với bản Windows. Cùng bộ tính năng,
+# nhưng chạy đúng "chất Linux":
+#   * Nhận diện GPU (NVIDIA / AMD / Intel / máy lai 2 GPU) + phiên X11/Wayland
+#   * Bật threaded OpenGL (Mesa & NVIDIA) + cache shader ra ổ cứng
+#   * Chạy kèm gamemoderun / mangohud / prime-run nếu máy có sẵn
+#   * LD_PRELOAD jemalloc / mimalloc -> JVM bớt phình RAM và bớt khựng
+#   * Cờ JVM riêng cho Linux: Transparent Huge Pages, NUMA, GLFW hệ thống
+#   * Vá lỗi cửa sổ trống trên WM kiểu i3 / sway / bspwm
+
+IS_LINUX = sys.platform.startswith("linux")
+SHADER_CACHE_DIR = CONFIG_DIR / "shader-cache"
+
+_PCI_VENDOR = {"0x10de": "nvidia", "0x1002": "amd", "0x1022": "amd", "0x8086": "intel"}
+
+# (key config, key i18n, mặc định, lệnh cần có)
+LINUX_TWEAKS = [
+    ("linux_gamemode",      "lin_gamemode",      True,  "gamemoderun"),
+    ("linux_mangohud",      "lin_mangohud",      False, "mangohud"),
+    ("linux_glthread",      "lin_glthread",      True,  None),
+    ("linux_shader_cache",  "lin_shader_cache",  True,  None),
+    ("linux_allocator",     "lin_allocator",     True,  None),
+    ("linux_thp",           "lin_thp",           True,  None),
+    ("linux_dgpu",          "lin_dgpu",          False, None),
+    ("linux_no_vsync",      "lin_no_vsync",      False, None),
+    ("linux_wm_fix",        "lin_wm_fix",        True,  None),
+    ("linux_system_glfw",   "lin_system_glfw",   False, None),
+    ("linux_high_priority", "lin_high_priority", False, "nice"),
+    ("linux_zgc",           "lin_zgc",           False, None),
+]
+
+_ALLOCATOR_CANDIDATES = [
+    "libjemalloc.so.2", "libjemalloc.so", "libmimalloc.so.2", "libmimalloc.so",
+]
+_LIB_DIRS = [
+    "/usr/lib", "/usr/lib64", "/usr/local/lib", "/usr/lib/x86_64-linux-gnu",
+    "/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu",
+]
+
+
+def detect_session_type() -> str:
+    """wayland / x11 / unknown."""
+    xdg = os.environ.get("XDG_SESSION_TYPE", "").lower()
+    if xdg in ("wayland", "x11"):
+        return xdg
+    if os.environ.get("WAYLAND_DISPLAY"):
+        return "wayland"
+    if os.environ.get("DISPLAY"):
+        return "x11"
+    return "unknown"
+
+
+def detect_gpu_vendors() -> list:
+    """Danh sách hãng GPU đang có: ['nvidia'], ['intel', 'nvidia'] (máy lai)..."""
+    found = []
+    try:
+        for p in sorted(Path("/sys/class/drm").glob("card*/device/vendor")):
+            vid = p.read_text(encoding="utf-8", errors="ignore").strip().lower()
+            name = _PCI_VENDOR.get(vid)
+            if name and name not in found:
+                found.append(name)
+    except Exception:
+        pass
+    if not found and shutil.which("lspci"):
+        try:
+            out = subprocess.run(["lspci"], capture_output=True, text=True, timeout=5).stdout.lower()
+            for line in out.splitlines():
+                if "vga" in line or "3d controller" in line or "display" in line:
+                    for key, name in (("nvidia", "nvidia"), ("amd", "amd"),
+                                      ("ati", "amd"), ("intel", "intel")):
+                        if key in line and name not in found:
+                            found.append(name)
+        except Exception:
+            pass
+    return found
+
+
+def detect_cpu_governor():
+    try:
+        return Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor").read_text().strip()
+    except Exception:
+        return None
+
+
+def detect_total_ram_mb() -> int:
+    try:
+        for line in Path("/proc/meminfo").read_text().splitlines():
+            if line.startswith("MemTotal:"):
+                return int(line.split()[1]) // 1024
+    except Exception:
+        pass
+    return 0
+
+
+def suggest_ram_mb() -> int:
+    """RAM nên cấp cho Minecraft: ~45% RAM máy, kẹp trong 2–8 GB."""
+    total = detect_total_ram_mb()
+    if not total:
+        return 3072
+    return max(2048, min(8192, (int(total * 0.45) // 512) * 512))
+
+
+def thp_available() -> bool:
+    try:
+        return "[never]" not in Path("/sys/kernel/mm/transparent_hugepage/enabled").read_text()
+    except Exception:
+        return False
+
+
+def numa_nodes() -> int:
+    try:
+        return max(1, len(list(Path("/sys/devices/system/node").glob("node[0-9]*"))))
+    except Exception:
+        return 1
+
+
+def find_allocator_preload():
+    """Tìm jemalloc / mimalloc trong hệ thống (nếu có)."""
+    for d in _LIB_DIRS:
+        for name in _ALLOCATOR_CANDIDATES:
+            p = Path(d) / name
+            if p.exists():
+                return str(p)
+    if shutil.which("ldconfig"):
+        try:
+            out = subprocess.run(["ldconfig", "-p"], capture_output=True,
+                                 text=True, timeout=5).stdout
+            for name in _ALLOCATOR_CANDIDATES:
+                for line in out.splitlines():
+                    if name in line and "=>" in line:
+                        return line.split("=>")[-1].strip()
+        except Exception:
+            pass
+    return None
+
+
+def find_system_glfw():
+    """libglfw của hệ thống — thường hỗ trợ Wayland tốt hơn bản LWJGL nhúng."""
+    for d in _LIB_DIRS:
+        for name in ("libglfw.so.3", "libglfw.so"):
+            p = Path(d) / name
+            if p.exists():
+                return str(p)
+    return None
+
+
+def _tw(cfg, key):
+    """Đọc 1 tuỳ chọn Linux từ config, có mặc định."""
+    for k, _i18n, default, _need in LINUX_TWEAKS:
+        if k == key:
+            return bool(cfg.get(key, default))
+    return bool(cfg.get(key, False))
+
+
+def build_launch_env(cfg) -> dict:
+    """Biến môi trường dùng khi chạy Minecraft (chỉ có tác dụng trên Linux)."""
+    env = os.environ.copy()
+    if not IS_LINUX:
+        return env
+
+    # Hai biến này hay được distro/IDE set sẵn và sẽ ĐÈ LÊN cờ JVM của
+    # launcher (ví dụ ép -Xmx nhỏ) -> bỏ đi cho chắc.
+    env.pop("_JAVA_OPTIONS", None)
+    env.pop("JAVA_TOOL_OPTIONS", None)
+
+    vendors = detect_gpu_vendors()
+
+    if _tw(cfg, "linux_glthread"):
+        env["mesa_glthread"] = "true"            # Mesa: AMD / Intel
+        env["__GL_THREADED_OPTIMIZATIONS"] = "1"  # driver NVIDIA
+
+    if _tw(cfg, "linux_shader_cache"):
+        try:
+            SHADER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        env["MESA_SHADER_CACHE_DIR"] = str(SHADER_CACHE_DIR)
+        env["MESA_SHADER_CACHE_MAX_SIZE"] = "4G"
+        env["__GL_SHADER_DISK_CACHE"] = "1"
+        env["__GL_SHADER_DISK_CACHE_SKIP_CLEANUP"] = "1"
+        env["__GL_SHADER_DISK_CACHE_PATH"] = str(SHADER_CACHE_DIR)
+
+    if _tw(cfg, "linux_no_vsync"):
+        env["vblank_mode"] = "0"          # Mesa
+        env["__GL_SYNC_TO_VBLANK"] = "0"  # NVIDIA
+
+    if _tw(cfg, "linux_wm_fix"):
+        # i3 / sway / bspwm / awesome: cửa sổ Java hay bị xám trắng nếu thiếu.
+        env["_JAVA_AWT_WM_NONREPARENTING"] = "1"
+
+    if _tw(cfg, "linux_dgpu"):
+        if "nvidia" in vendors:
+            env["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+            env["__GLX_VENDOR_LIBRARY_NAME"] = "nvidia"
+            env["__VK_LAYER_NV_optimus"] = "NVIDIA_only"
+        else:
+            env["DRI_PRIME"] = "1"
+
+    if _tw(cfg, "linux_allocator"):
+        lib = find_allocator_preload()
+        if lib:
+            env["LD_PRELOAD"] = (env.get("LD_PRELOAD", "") + " " + lib).strip()
+
+    return env
+
+
+def build_launch_prefix(cfg) -> list:
+    """Các lệnh bọc ngoài java: prime-run / gamemoderun / mangohud / nice."""
+    if not IS_LINUX:
+        return []
+    prefix = []
+    if _tw(cfg, "linux_gamemode") and shutil.which("gamemoderun"):
+        prefix.append("gamemoderun")
+    if _tw(cfg, "linux_mangohud") and shutil.which("mangohud"):
+        prefix.append("mangohud")
+    if _tw(cfg, "linux_dgpu") and shutil.which("prime-run") and "nvidia" in detect_gpu_vendors():
+        prefix.insert(0, "prime-run")
+    if _tw(cfg, "linux_high_priority") and shutil.which("nice"):
+        # Không có quyền thì nice chỉ cảnh báo rồi chạy tiếp, không làm hỏng lệnh.
+        prefix = ["nice", "-n", "-5"] + prefix
+    return prefix
+
+
+BASE_JVM_ARGS_G1 = [
+    "-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled",
+    "-XX:MaxGCPauseMillis=200", "-XX:+UnlockExperimentalVMOptions",
+    "-XX:+DisableExplicitGC", "-XX:+AlwaysPreTouch",
+    "-XX:G1NewSizePercent=30", "-XX:G1MaxNewSizePercent=40",
+    "-XX:G1HeapRegionSize=8M", "-XX:G1ReservePercent=20",
+    "-XX:G1HeapWastePercent=5", "-XX:G1MixedGCCountTarget=4",
+    "-XX:InitiatingHeapOccupancyPercent=15",
+    "-XX:G1MixedGCLiveThresholdPercent=90",
+    "-XX:G1RSetUpdatingPauseTimePercent=5",
+    "-XX:SurvivorRatio=32", "-XX:+PerfDisableSharedMem",
+    "-XX:MaxTenuringThreshold=1",
+]
+
+BASE_JVM_ARGS_ZGC = [
+    "-XX:+UnlockExperimentalVMOptions", "-XX:+UseZGC",
+    "-XX:+DisableExplicitGC", "-XX:+AlwaysPreTouch",
+    "-XX:+PerfDisableSharedMem",
+]
+
+
+def clamp_ram_mb(ram: int) -> int:
+    """Không cho cấp RAM vượt 75% RAM máy (Linux OOM-killer sẽ giết game)."""
+    total = detect_total_ram_mb()
+    if total and ram > int(total * 0.75):
+        return max(1024, (int(total * 0.75) // 512) * 512)
+    return ram
+
+
+def linux_jvm_args(ram: int, cfg, java_major=None) -> list:
+    """Cờ JVM: bộ chung của Arch Client + phần thêm riêng cho Linux."""
+    ram = clamp_ram_mb(int(ram))
+    if _tw(cfg, "linux_zgc") and ram >= 8192:
+        args = [f"-Xms{ram}M", f"-Xmx{ram}M"] + list(BASE_JVM_ARGS_ZGC)
+        if java_major and java_major <= 23:
+            args.append("-XX:+ZGenerational")
+    else:
+        args = [f"-Xms{ram}M", f"-Xmx{ram}M"] + list(BASE_JVM_ARGS_G1)
+
+    if not IS_LINUX:
+        return args
+
+    if _tw(cfg, "linux_thp"):
+        if thp_available():
+            args.append("-XX:+UseTransparentHugePages")
+        if numa_nodes() > 1:
+            args += ["-XX:+UseNUMA", "-XX:+UseNUMAInterleaving"]
+
+    # LWJGL: bỏ lớp kiểm tra tham số thừa ở mỗi lời gọi OpenGL.
+    args += ["-Dorg.lwjgl.util.NoChecks=true"]
+
+    if _tw(cfg, "linux_system_glfw"):
+        glfw = find_system_glfw()
+        if glfw:
+            args.append(f"-Dorg.lwjgl.glfw.libname={glfw}")
+
+    return args
+
+
+def linux_hw_summary() -> dict:
+    """Thông tin phần cứng để hiện trong tab Tối ưu."""
+    gpus = detect_gpu_vendors()
+    return {
+        "gpu": "+".join(g.upper() for g in gpus) or "?",
+        "hybrid": len(gpus) > 1,
+        "session": detect_session_type(),
+        "cores": os.cpu_count() or 0,
+        "gov": detect_cpu_governor() or "?",
+        "ram": detect_total_ram_mb(),
+        "suggest_ram": suggest_ram_mb(),
+        "gamemode": bool(shutil.which("gamemoderun")),
+        "mangohud": bool(shutil.which("mangohud")),
+        "allocator": find_allocator_preload(),
+        "glfw": find_system_glfw(),
+    }
+
+
+def describe_launch_setup(cfg) -> list:
+    """Mô tả ngắn gọn những gì sẽ được áp dụng — in ra console trước khi chạy."""
+    if not IS_LINUX:
+        return []
+    lines = []
+    prefix = build_launch_prefix(cfg)
+    if prefix:
+        lines.append("wrapper: " + " ".join(prefix))
+    env = build_launch_env(cfg)
+    watch = ["mesa_glthread", "__GL_THREADED_OPTIMIZATIONS", "vblank_mode",
+             "__GL_SYNC_TO_VBLANK", "DRI_PRIME", "__NV_PRIME_RENDER_OFFLOAD",
+             "LD_PRELOAD", "MESA_SHADER_CACHE_DIR", "_JAVA_AWT_WM_NONREPARENTING"]
+    shown = [f"{k}={env[k]}" for k in watch if k in env and env[k] != os.environ.get(k)]
+    if shown:
+        lines.append("env: " + "  ".join(shown))
+    gov = detect_cpu_governor()
+    if gov in ("powersave", "conservative") and not shutil.which("gamemoderun"):
+        lines.append(f"⚠ CPU governor = {gov} — cài 'gamemode' hoặc đổi sang 'performance' để hết tụt FPS.")
+    return lines
+
+
+GAMING_PACKAGES = {
+    "pacman": ["gamemode", "mangohud", "jemalloc"],
+    "apt":    ["gamemode", "mangohud", "libjemalloc2"],
+    "dnf":    ["gamemode", "mangohud", "jemalloc"],
+    "zypper": ["gamemode", "mangohud", "jemalloc"],
+}
+
+
+def install_gaming_tools(osinfo) -> bool:
+    """Cài gamemode / mangohud / jemalloc — chỉ chạy khi người dùng bấm nút."""
+    if not IS_LINUX or osinfo.get("immutable"):
+        return False
+    pm = osinfo.get("pkg_manager")
+    pkgs = GAMING_PACKAGES.get(pm)
+    if not pkgs:
+        return False
+    if pm == "pacman":
+        return _run(["pacman", "-Sy", "--needed", "--noconfirm"] + pkgs, use_sudo=True)
+    if pm == "apt":
+        _run(["apt-get", "update"], use_sudo=True)
+        return _run(["apt-get", "install", "-y"] + pkgs, use_sudo=True)
+    if pm == "dnf":
+        return _run(["dnf", "install", "-y"] + pkgs, use_sudo=True)
+    if pm == "zypper":
+        return _run(["zypper", "--non-interactive", "install"] + pkgs, use_sudo=True)
+    return False
+
+
 def default_config():
     return {
         "mc_dir": str(DEFAULT_MC_DIR), "java_path": "java", "ram_mb": 3072,
@@ -706,6 +1431,10 @@ def default_config():
         "auto_install_shortcuts": True,
         "mc_version": MC_VERSION,
         "lang": "auto",  # auto | vi | en
+        "java_major": JAVA_MAJOR_REQUIRED,  # bản Java sẽ tự cài: 21..26
+        "search_engine": DEFAULT_SEARCH_ENGINE,  # DuckDuckGo | Google | Bing | ...
+        # --- tuỳ chọn tối ưu riêng cho Linux (xem LINUX_TWEAKS) ---
+        **{key: default for key, _i18n, default, _need in LINUX_TWEAKS},
     }
 
 
@@ -953,6 +1682,9 @@ def windows_start_menu_dir() -> Path:
 
 
 def windows_python_target() -> Path:
+    if FROZEN:
+        # Bản .exe đóng gói: shortcut chạy thẳng file .exe, không cần python.
+        return Path(sys.executable)
     exe = Path(sys.executable)
     if exe.name.lower() in ("python.exe", "python3.exe"):
         pythonw = exe.with_name("pythonw.exe")
@@ -983,7 +1715,6 @@ def _ps_single(value: str) -> str:
 
 def install_windows_shortcuts() -> dict:
     target = str(windows_python_target())
-    script = str(Path(__file__).resolve())
     workdir = str(APP_DIR)
     ico = windows_ico_path()
     icon_loc = f"{ico},0" if ico else f"{target},0"
@@ -991,7 +1722,12 @@ def install_windows_shortcuts() -> dict:
     start = windows_start_menu_dir()
     desktop.mkdir(parents=True, exist_ok=True)
     links = [str(desktop / SHORTCUT_WINDOWS_NAME), str(start / SHORTCUT_WINDOWS_NAME)]
-    arg = f'"{script}"'
+    if FROZEN:
+        # .exe tự chạy được — không cần truyền script.py làm tham số nữa.
+        arg = ""
+    else:
+        script = str(Path(__file__).resolve())
+        arg = f'"{script}"'
     lines = [
         "$ErrorActionPreference = 'Stop'",
         "$W = New-Object -ComObject WScript.Shell",
@@ -1254,6 +1990,25 @@ class App(tb.Window):
         self.after(50, self._fade_in_body)
 
     # ---------------------------------------------------------------- header
+    def t(self, key, default=None, **kw):
+        """Lấy chuỗi theo ngôn ngữ hiện tại; thiếu key thì lùi về EN rồi default."""
+        s = self.LANG.get(key)
+        if s is None:
+            s = LANG_STRINGS["en"].get(key)
+        if s is None:
+            s = default if default is not None else key
+        if kw:
+            try:
+                return s.format(**kw)
+            except Exception:
+                return s
+        return s
+
+    def mod_desc(self, slug):
+        """Mô tả mod tối ưu hoá theo ngôn ngữ hiện tại."""
+        table = MOD_DESCRIPTIONS.get(self.lang) or MOD_DESCRIPTIONS["en"]
+        return table.get(slug) or MOD_DESCRIPTIONS["en"].get(slug, "")
+
     def _build_header(self):
         # Header gọn: logo bo góc + title, status bên phải — tránh logo nhỏ méo góc cứng.
         header = tb.Frame(self, bootstyle="primary", padding=(16, 14))
@@ -1376,14 +2131,15 @@ class App(tb.Window):
                    command=self.refresh_all).pack(side="left")
 
         # File list
-        list_wrap = tb.Labelframe(f, text="Chi tiết file", padding=8, bootstyle="secondary")
+        list_wrap = tb.Labelframe(f, text=self.t("ov_files_title"), padding=8,
+                                   bootstyle="secondary")
         list_wrap.pack(fill="both", expand=True)
 
         cols = ("loai", "ten")
         self.tree = tb.Treeview(list_wrap, columns=cols, show="headings",
                                   bootstyle="primary", height=12)
-        self.tree.heading("loai", text="Loại")
-        self.tree.heading("ten", text="Tên file")
+        self.tree.heading("loai", text=self.t("ov_col_type"))
+        self.tree.heading("ten", text=self.t("ov_col_name"))
         self.tree.column("loai", width=140, anchor="w")
         self.tree.column("ten", width=560, anchor="w")
         self.tree.pack(fill="both", expand=True, side="left")
@@ -1449,7 +2205,7 @@ class App(tb.Window):
             ).pack(side="left", padx=(0, 8))
         tb.Label(
             f,
-            text="Tự động = nhận diện theo IP (VN → Tiếng Việt).",
+            text=self.t("lang_hint"),
             bootstyle="secondary", font=("", 8),
         ).grid(row=1, column=1, columnspan=2, sticky="w", pady=(0, 6))
 
@@ -1469,22 +2225,35 @@ class App(tb.Window):
                   bootstyle="secondary", font=("", 8)).pack(side="left", padx=10)
 
         # ---- Java ----
-        tb.Label(f, text="Java", font=("", 11, "bold")).grid(row=3, column=0, sticky="w", **pad)
+        tb.Label(f, text=self.t("set_java"), font=("", 11, "bold")).grid(
+            row=3, column=0, sticky="w", **pad)
         self.java_var = tk.StringVar(value=self.cfg["java_path"])
         tb.Entry(f, textvariable=self.java_var, width=45, bootstyle="primary").grid(
             row=3, column=1, sticky="w", **pad)
-        tb.Button(f, text="Chọn file...", bootstyle="secondary-outline",
+        tb.Button(f, text=self.t("set_java_browse"), bootstyle="secondary-outline",
                    command=self.choose_java).grid(row=3, column=2, sticky="w", padx=6)
 
         java_row = tb.Frame(f)
         java_row.grid(row=4, column=1, columnspan=2, sticky="w", pady=(0, 6))
-        self.java_status_lbl = tb.Label(java_row, text="☕ Chưa kiểm tra Java",
+        self.java_status_lbl = tb.Label(java_row, text=self.t("set_java_unchecked"),
                                           bootstyle="secondary", font=("", 9))
         self.java_status_lbl.pack(side="left")
-        tb.Button(java_row, text="⬇ Kiểm tra / Cài Java tự động", bootstyle="info-outline",
+
+        tb.Label(java_row, text=self.t("set_java_target"), bootstyle="secondary").pack(
+            side="left", padx=(12, 4))
+        self.java_major_var = tk.StringVar(
+            value=str(self.cfg.get("java_major", JAVA_MAJOR_REQUIRED)))
+        self.java_major_combo = tb.Combobox(
+            java_row, textvariable=self.java_major_var, values=JAVA_VERSION_CHOICES,
+            width=4, bootstyle="primary", state="readonly",
+        )
+        self.java_major_combo.pack(side="left")
+        self.java_major_combo.bind("<<ComboboxSelected>>", self._on_java_major_changed)
+
+        tb.Button(java_row, text=self.t("set_java_install"), bootstyle="info-outline",
                    command=self.install_java_thread).pack(side="left", padx=(12, 0))
 
-        tb.Label(f, text="RAM cấp cho game", font=("", 11, "bold")).grid(
+        tb.Label(f, text=self.t("set_ram"), font=("", 11, "bold")).grid(
             row=5, column=0, sticky="w", **pad)
         ram_wrap = tb.Frame(f)
         ram_wrap.grid(row=5, column=1, sticky="w", **pad)
@@ -1493,21 +2262,21 @@ class App(tb.Window):
                     textvariable=self.ram_var, width=10, bootstyle="primary").pack(side="left")
         tb.Label(ram_wrap, text=" MB", bootstyle="secondary").pack(side="left")
 
-        tb.Label(f, text="Tên người chơi", font=("", 11, "bold")).grid(
+        tb.Label(f, text=self.t("set_username"), font=("", 11, "bold")).grid(
             row=6, column=0, sticky="w", **pad)
         self.user_var = tk.StringVar(value=self.cfg.get("username", "Player"))
         tb.Entry(f, textvariable=self.user_var, width=30, bootstyle="primary").grid(
             row=6, column=1, sticky="w", **pad)
 
-        tb.Label(f, text="Azure client_id", font=("", 11, "bold")).grid(
+        tb.Label(f, text=self.t("set_client_id"), font=("", 11, "bold")).grid(
             row=7, column=0, sticky="w", **pad)
         self.client_id_var = tk.StringVar(value=self.cfg.get("azure_client_id", ""))
         tb.Entry(f, textvariable=self.client_id_var, width=45, bootstyle="primary").grid(
             row=7, column=1, sticky="w", **pad)
-        tb.Button(f, text="Login Microsoft", bootstyle="info-outline",
+        tb.Button(f, text=self.t("set_login"), bootstyle="info-outline",
                    command=self.login_microsoft_thread).grid(row=7, column=2, sticky="w", padx=6)
 
-        tb.Button(f, text="💾 Lưu cài đặt", bootstyle="success",
+        tb.Button(f, text=self.t("set_save"), bootstyle="success",
                    command=self.save_settings).grid(row=8, column=1, sticky="w", pady=12)
 
         # ---- Shortcuts ----
@@ -1554,6 +2323,8 @@ class App(tb.Window):
             "username": self.user_var.get(), "azure_client_id": self.client_id_var.get(),
             "mc_dir": str(self.mc_dir),
         })
+        for key, var in getattr(self, "linux_vars", {}).items():
+            self.cfg[key] = bool(var.get())
         save_config(self.cfg)
         self.title("Arch Client — Minecraft " + self.mc_version)
         try:
@@ -1660,17 +2431,31 @@ class App(tb.Window):
     def install_java_thread(self):
         threading.Thread(target=self._install_java_auto, daemon=True).start()
 
+    def _on_java_major_changed(self, event=None):
+        try:
+            self.cfg["java_major"] = int(self.java_major_var.get())
+            save_config(self.cfg)
+            self.log(f"☕ Sẽ cài OpenJDK {self.cfg['java_major']} ở lần bấm cài tiếp theo.")
+        except Exception:
+            pass
+
     def _install_java_auto(self):
         try:
+            # Bản Java người dùng chọn trong Settings (21-26), mặc định = tối thiểu bắt buộc.
+            try:
+                target_major = int(self.java_major_var.get())
+            except Exception:
+                target_major = int(self.cfg.get("java_major", JAVA_MAJOR_REQUIRED))
+
             self.set_status("Đang cài Java...", "inverse-warning")
             self._set_java_status("☕ Đang cài đặt...", "warning")
-            self.log(f"☕ Bắt đầu cài OpenJDK {JAVA_MAJOR_REQUIRED}...")
+            self.log(f"☕ Bắt đầu cài OpenJDK {target_major}...")
 
             # Bước 1 (chỉ Linux): thử qua trình quản lý gói hệ thống trước —
             # nhanh hơn, cập nhật được qua hệ thống, phù hợp CachyOS/Arch/Debian/Ubuntu.
             if OS_INFO.get("system") == "Linux" and OS_INFO.get("pkg_manager"):
                 self.log(f"  → Thử cài qua trình quản lý gói ({OS_INFO['pkg_manager']})...")
-                if install_java_via_pkg_manager(OS_INFO, JAVA_MAJOR_REQUIRED):
+                if install_java_via_pkg_manager(OS_INFO, target_major):
                     exe = shutil.which("java")
                     ver = get_java_version(exe) if exe else None
                     if exe and ver and ver >= JAVA_MAJOR_REQUIRED:
@@ -1679,7 +2464,7 @@ class App(tb.Window):
                         save_config(self.cfg)
                         self.log(f"✅ Đã cài Java {ver} qua trình quản lý gói: {exe}")
                         self._set_java_status(f"☕ Java {ver} — OK", "success")
-                        self.set_status("Sẵn sàng")
+                        self.set_status(self.t("status_ready"))
                         return
                     self.log("  ⚠ Gói hệ thống không đủ mới hoặc không có sẵn — "
                               "chuyển sang tải bản OpenJDK rời (portable).")
@@ -1693,21 +2478,21 @@ class App(tb.Window):
                 self.log("❌ Thiếu thư viện 'requests' nên không thể tự tải Java. "
                           "Cài thủ công: pip install requests --break-system-packages")
                 self._set_java_status("☕ Cần cài Java thủ công", "danger")
-                self.set_status("Lỗi", "inverse-danger")
+                self.set_status(self.t("status_error"), "inverse-danger")
                 return
 
-            url, ext = adoptium_download_info(JAVA_MAJOR_REQUIRED)
+            url, ext = adoptium_download_info(target_major)
             if not url:
                 self.log(f"❌ Không hỗ trợ tự động cài Java trên hệ điều hành/kiến trúc này "
-                          f"({OS_INFO.get('pretty')}). Vui lòng cài Java {JAVA_MAJOR_REQUIRED}+ thủ công "
+                          f"({OS_INFO.get('pretty')}). Vui lòng cài Java {target_major} thủ công "
                           "rồi chọn file java trong mục Cài đặt.")
                 self._set_java_status("☕ Cần cài Java thủ công", "danger")
-                self.set_status("Lỗi", "inverse-danger")
+                self.set_status(self.t("status_error"), "inverse-danger")
                 return
 
             JRE_DIR.mkdir(parents=True, exist_ok=True)
-            archive_path = JRE_DIR / f"openjdk{JAVA_MAJOR_REQUIRED}.{ext}"
-            self.log(f"⬇ Đang tải OpenJDK {JAVA_MAJOR_REQUIRED} (Eclipse Temurin)... "
+            archive_path = JRE_DIR / f"openjdk{target_major}.{ext}"
+            self.log(f"⬇ Đang tải OpenJDK {target_major} (Eclipse Temurin)... "
                       "có thể mất vài phút tuỳ tốc độ mạng.")
             download_file(url, archive_path, log_fn=self.log)
 
@@ -1724,32 +2509,33 @@ class App(tb.Window):
                 except Exception:
                     pass
 
-            ver = get_java_version(java_exe) or JAVA_MAJOR_REQUIRED
+            ver = get_java_version(java_exe) or target_major
             self.java_var.set(str(java_exe))
             self.cfg["java_path"] = str(java_exe)
             save_config(self.cfg)
             self.log(f"✅ Đã cài Java {ver} thành công tại: {java_exe}")
             self._set_java_status(f"☕ Java {ver} — OK", "success")
-            self.set_status("Sẵn sàng")
+            self.set_status(self.t("status_ready"))
         except Exception as e:
             self.log(f"❌ Lỗi khi cài Java: {e}")
             log_path = write_error_log("Cài OpenJDK tự động", exc=e)
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
             self._set_java_status("☕ Cài Java thất bại", "danger")
-            self.set_status("Lỗi", "inverse-danger")
+            self.set_status(self.t("status_error"), "inverse-danger")
 
     # -------------------------------------------------------- optimize tab
     def _build_optimize_tab(self):
         f = self.tab_optimize
-        tb.Label(f, text="🚀 Tối ưu FPS / hiệu năng", font=("", 14, "bold")).pack(anchor="w")
-        tb.Label(f, text="Ghi options.txt tối ưu + tải mod tối ưu còn thiếu từ Modrinth",
+        tb.Label(f, text=self.t("opt_title"), font=("", 14, "bold")).pack(anchor="w")
+        tb.Label(f, text=self.t("opt_sub"),
                   bootstyle="secondary").pack(anchor="w", pady=(0, 12))
 
         self.mod_vars = {}
-        box = tb.Labelframe(f, text="Mod tối ưu hoá", padding=10, bootstyle="secondary")
+        box = tb.Labelframe(f, text=self.t("opt_box"), padding=10, bootstyle="secondary")
         box.pack(fill="x", pady=(0, 14))
-        for slug, desc in OPTIMIZATION_MODS.items():
+        for slug in OPTIMIZATION_MODS:
+            desc = self.mod_desc(slug)
             var = tk.BooleanVar(value=True)
             self.mod_vars[slug] = var
             row = tb.Frame(box)
@@ -1761,86 +2547,196 @@ class App(tb.Window):
         self.opt_progress = tb.Progressbar(f, mode="indeterminate", bootstyle="success-striped")
         self.opt_progress.pack(fill="x", pady=(4, 10))
 
-        tb.Button(f, text="🚀 Áp dụng tối ưu FPS ngay", bootstyle="success",
+        tb.Button(f, text=self.t("opt_apply"), bootstyle="success",
                    command=self.apply_optimization_thread).pack(anchor="w")
 
+        if IS_LINUX:
+            self._build_linux_tweaks(f)
+
+    # ------------------------------------------------ khối tối ưu Linux
+    def _build_linux_tweaks(self, parent):
+        """Khối tuỳ chọn chỉ có trên bản Linux (bản Windows không có)."""
+        self.linux_vars = {}
+        box = tb.Labelframe(parent, text=self.t("lin_box"), padding=10,
+                             bootstyle="info")
+        box.pack(fill="x", pady=(14, 0))
+
+        self._linux_hw_label = tb.Label(box, text="", bootstyle="secondary")
+        self._linux_hw_label.pack(anchor="w", pady=(0, 8))
+
+        grid = tb.Frame(box)
+        grid.pack(fill="x")
+        for i, (key, i18n_key, default, need) in enumerate(LINUX_TWEAKS):
+            var = tk.BooleanVar(value=bool(self.cfg.get(key, default)))
+            self.linux_vars[key] = var
+            row = tb.Frame(grid)
+            row.grid(row=i // 2, column=i % 2, sticky="w", padx=(0, 18), pady=2)
+            tb.Checkbutton(row, variable=var,
+                            bootstyle="info-round-toggle").pack(side="left")
+            tb.Label(row, text="  " + self.t(i18n_key)).pack(side="left")
+            if need and not shutil.which(need):
+                tb.Label(row, text=self.t("lin_missing", cmd=need),
+                          bootstyle="warning").pack(side="left")
+        grid.columnconfigure(0, weight=1)
+        grid.columnconfigure(1, weight=1)
+
+        btns = tb.Frame(box)
+        btns.pack(fill="x", pady=(10, 0))
+        tb.Button(btns, text=self.t("lin_save"), bootstyle="info",
+                   command=self.save_linux_tweaks).pack(side="left")
+        tb.Button(btns, text=self.t("lin_scan"), bootstyle="secondary-outline",
+                   command=self.refresh_linux_hw).pack(side="left", padx=6)
+        if OS_INFO.get("pkg_manager") in GAMING_PACKAGES and not OS_INFO.get("immutable"):
+            tb.Button(btns, text=self.t("lin_install_tools"),
+                       bootstyle="secondary-outline",
+                       command=self.install_gaming_tools_thread).pack(side="left")
+
+        self.refresh_linux_hw()
+
+    def refresh_linux_hw(self):
+        """Quét lại GPU / phiên hiển thị / CPU / RAM và hiện lên tab Tối ưu."""
+        if not hasattr(self, "_linux_hw_label"):
+            return
+        hw = linux_hw_summary()
+        self._linux_hw_label.config(text=self.t(
+            "lin_hw", gpu=hw["gpu"], session=hw["session"], cores=hw["cores"],
+            gov=hw["gov"], ram=hw["ram"], suggest=hw["suggest_ram"]))
+        return hw
+
+    def save_linux_tweaks(self):
+        for key, var in getattr(self, "linux_vars", {}).items():
+            self.cfg[key] = bool(var.get())
+        save_config(self.cfg)
+        self.log(self.t("lin_saved"))
+        for line in describe_launch_setup(self.cfg):
+            self.log("   " + line)
+
+    def install_gaming_tools_thread(self):
+        threading.Thread(target=self._install_gaming_tools, daemon=True).start()
+
+    def _install_gaming_tools(self):
+        self.log("⏳ Đang cài gamemode / MangoHud / jemalloc (có thể cần mật khẩu sudo ở terminal)...")
+        try:
+            ok = install_gaming_tools(OS_INFO)
+        except Exception as e:
+            ok = False
+            write_error_log("Cài công cụ gaming Linux", exc=e)
+        if ok:
+            self.log("✅ Đã cài xong. Bật lại các tuỳ chọn tương ứng rồi bấm Lưu.")
+        else:
+            self.log("⚠ Không cài được tự động — hãy cài thủ công gói 'gamemode' và 'mangohud'.")
+        self.after(0, self.refresh_linux_hw)
+
     # ----------------------------------------------------------- Browser tab
+    # Kho nội dung Modrinth: Mods / Resource Packs / Shaders / Modpacks,
+    # có ảnh minh hoạ cho từng mục (tải nền, không chặn UI) + trình duyệt web
+    # kèm công cụ tìm kiếm (DuckDuckGo, Google, Bing…) giống trình duyệt thật.
+
+    # project_type Modrinth -> (thư mục đích trong .minecraft, key i18n)
+    BROWSE_TYPES = [
+        ("mod", "mods", "br_type_mod"),
+        ("resourcepack", "resourcepacks", "br_type_resourcepack"),
+        ("shader", "shaderpacks", "br_type_shader"),
+    ]
+    THUMB_SIZE = 36
+    MODRINTH_UA = "ArchClient/2.1 (launcher)"
+
     def _build_browser_tab(self):
-        """Tab Browser luôn hiện: tìm/tải mod Modrinth + mở trang web (nhúng nếu có)."""
         f = self.tab_browser
         self._browser_history = []
         self._browser_hist_i = -1
         self._html_frame = None
-        self._browser_mode = "mods"  # mods | web
+        self._browser_mode = "mods"
+        self._thumb_cache = {}        # url -> PhotoImage (giữ tham chiếu, tránh GC)
+        self._row_images = {}         # iid -> PhotoImage
+        self._blank_thumb = None
+        self._thumb_token = 0         # huỷ ảnh của lượt tìm cũ
 
-        tip = tb.Label(
-            f,
-            text="Browser mod · tìm & tải từ Modrinth · chống tracker khi mở web",
-            bootstyle="secondary",
-            font=("", 8),
-        )
-        tip.pack(anchor="w", pady=(0, 6))
+        tb.Label(f, text=self.t("br_tip"), bootstyle="secondary", font=("", 8)).pack(
+            anchor="w", pady=(0, 6))
 
         mode_bar = tb.Frame(f)
         mode_bar.pack(fill="x", pady=(0, 6))
         self._btn_mode_mods = tb.Button(
-            mode_bar, text="Kho mod (Modrinth)", bootstyle="info",
-            command=lambda: self._browser_show_mode("mods"),
-        )
+            mode_bar, text=self.t("br_mode_store"), bootstyle="info",
+            command=lambda: self._browser_show_mode("mods"))
         self._btn_mode_mods.pack(side="left", padx=(0, 6))
         self._btn_mode_web = tb.Button(
-            mode_bar, text="Trang web", bootstyle="secondary-outline",
-            command=lambda: self._browser_show_mode("web"),
-        )
+            mode_bar, text=self.t("br_mode_web"), bootstyle="secondary-outline",
+            command=lambda: self._browser_show_mode("web"))
         self._btn_mode_web.pack(side="left", padx=(0, 6))
-        tb.Button(
-            mode_bar, text="Cài engine browser", bootstyle="secondary-outline",
-            command=self._browser_reinstall_deps,
-        ).pack(side="right")
+        tb.Button(mode_bar, text=self.t("br_install_engine"), bootstyle="secondary-outline",
+                   command=self._browser_reinstall_deps).pack(side="right")
 
-        # ---- panel: search mods (luôn hoạt động với requests) ----
+        # =============================== PANEL: kho nội dung Modrinth =========
         self._panel_mods = tb.Frame(f)
         self._panel_mods.pack(fill="both", expand=True)
 
+        # hàng chọn loại nội dung: Mods / Resource Packs / Shaders / Modpacks
+        type_row = tb.Frame(self._panel_mods)
+        type_row.pack(fill="x", pady=(0, 6))
+        self.browse_type_var = tk.StringVar(value="mod")
+        for ptype, _folder, key in self.BROWSE_TYPES:
+            tb.Radiobutton(
+                type_row, text=self.t(key), value=ptype,
+                variable=self.browse_type_var, bootstyle="info-toolbutton",
+                command=self._modrinth_search,
+            ).pack(side="left", padx=(0, 6))
+
         search_row = tb.Frame(self._panel_mods)
         search_row.pack(fill="x", pady=(0, 6))
-        tb.Label(search_row, text="Tìm mod:", font=("", 9, "bold")).pack(side="left")
-        self.mod_search_var = tk.StringVar(value="sodium")
+        tb.Label(search_row, text=self.t("br_search_label"),
+                  font=("", 9, "bold")).pack(side="left")
+        self.mod_search_var = tk.StringVar(value="")
         ent = tb.Entry(search_row, textvariable=self.mod_search_var, bootstyle="primary")
         ent.pack(side="left", fill="x", expand=True, padx=8)
         ent.bind("<Return>", lambda e: self._modrinth_search())
-        tb.Button(search_row, text="Tìm", bootstyle="primary",
+        tb.Button(search_row, text=self.t("br_btn_search"), bootstyle="primary",
                    command=self._modrinth_search).pack(side="left", padx=(0, 4))
-        tb.Button(search_row, text="Tải đã chọn", bootstyle="success",
-                   command=self._modrinth_download_selected).pack(side="left")
+        tb.Button(search_row, text=self.t("br_btn_download"), bootstyle="success",
+                   command=self._modrinth_download_selected).pack(side="left", padx=(0, 4))
+        tb.Button(search_row, text=self.t("br_btn_open_page"), bootstyle="secondary-outline",
+                   command=self._modrinth_open_selected_page).pack(side="left")
 
-        self.browser_status = tb.Label(
-            self._panel_mods,
-            text="Gõ tên mod → Tìm → chọn dòng → Tải (vào thư mục mods)",
-            bootstyle="secondary", font=("", 8),
-        )
+        self.browser_status = tb.Label(self._panel_mods, text=self.t("br_hint"),
+                                        bootstyle="secondary", font=("", 8))
         self.browser_status.pack(anchor="w", pady=(0, 4))
 
         list_wrap = tb.Frame(self._panel_mods)
         list_wrap.pack(fill="both", expand=True)
-        cols = ("name", "downloads", "ver")
+
+        # show="tree headings": cột #0 dùng để hiển thị ẢNH của mod/pack.
+        cols = ("name", "author", "downloads", "desc")
         self.mod_tree = tb.Treeview(
-            list_wrap, columns=cols, show="headings", bootstyle="primary", height=12,
-        )
-        self.mod_tree.heading("name", text="Mod")
-        self.mod_tree.heading("downloads", text="Lượt tải")
-        self.mod_tree.heading("ver", text="Game")
-        self.mod_tree.column("name", width=360, anchor="w")
-        self.mod_tree.column("downloads", width=100, anchor="e")
-        self.mod_tree.column("ver", width=120, anchor="w")
+            list_wrap, columns=cols, show="tree headings",
+            bootstyle="primary", height=10)
+        self.mod_tree.heading("#0", text=self.t("br_col_icon"))
+        self.mod_tree.heading("name", text=self.t("br_col_name"))
+        self.mod_tree.heading("author", text=self.t("br_col_author"))
+        self.mod_tree.heading("downloads", text=self.t("br_col_downloads"))
+        self.mod_tree.heading("desc", text=self.t("br_col_desc"))
+        self.mod_tree.column("#0", width=56, minwidth=56, stretch=False, anchor="center")
+        self.mod_tree.column("name", width=210, anchor="w")
+        self.mod_tree.column("author", width=120, anchor="w")
+        self.mod_tree.column("downloads", width=90, anchor="e")
+        self.mod_tree.column("desc", width=360, anchor="w")
         self.mod_tree.pack(side="left", fill="both", expand=True)
+        self.mod_tree.bind("<Double-1>", lambda e: self._modrinth_download_selected())
+
         sb = tb.Scrollbar(list_wrap, orient="vertical", command=self.mod_tree.yview,
                            bootstyle="round-primary")
         sb.pack(side="right", fill="y")
         self.mod_tree.configure(yscrollcommand=sb.set)
-        self._mod_results = []  # list of dict from API
 
-        # ---- panel: web (nhúng hoặc cửa sổ) ----
+        # Hàng phải đủ cao mới thấy ảnh 36px (mặc định ttk chỉ ~20px).
+        try:
+            self.style.configure("Treeview", rowheight=self.THUMB_SIZE + 10)
+        except Exception:
+            pass
+
+        self._mod_results = []
+
+        # ======================================== PANEL: trình duyệt web ======
         self._panel_web = tb.Frame(f)
 
         bar = tb.Frame(self._panel_web)
@@ -1851,16 +2747,37 @@ class App(tb.Window):
                    command=self._browser_forward).pack(side="left", padx=(0, 2))
         tb.Button(bar, text="↻", width=3, bootstyle="secondary-outline",
                    command=self._browser_reload).pack(side="left", padx=(0, 4))
-        tb.Button(bar, text="Home", bootstyle="info-outline",
+        tb.Button(bar, text=self.t("br_home"), bootstyle="info-outline",
                    command=self._browser_go_home).pack(side="left", padx=(0, 6))
         self.browser_url_var = tk.StringVar(value=BROWSER_HOME)
         url_entry = tb.Entry(bar, textvariable=self.browser_url_var, bootstyle="primary")
         url_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
         url_entry.bind("<Return>", lambda e: self._browser_go())
-        tb.Button(bar, text="Go", bootstyle="primary",
+        tb.Button(bar, text=self.t("br_btn_go"), bootstyle="primary",
                    command=self._browser_go).pack(side="left", padx=(0, 4))
-        tb.Button(bar, text="Cửa sổ riêng", bootstyle="secondary-outline",
+        tb.Button(bar, text=self.t("br_private_window"), bootstyle="secondary-outline",
                    command=self._browser_open_secure_window).pack(side="left")
+
+        # ---- hàng công cụ tìm kiếm (giống trình duyệt thật) ----
+        engine_row = tb.Frame(self._panel_web)
+        engine_row.pack(fill="x", pady=(0, 6))
+        tb.Label(engine_row, text=self.t("br_search_engine"),
+                  font=("", 9, "bold")).pack(side="left", padx=(0, 6))
+        self.search_engine_var = tk.StringVar(
+            value=self.cfg.get("search_engine", DEFAULT_SEARCH_ENGINE))
+        self.search_engine_combo = tb.Combobox(
+            engine_row, textvariable=self.search_engine_var,
+            values=list(SEARCH_ENGINES.keys()), width=13,
+            bootstyle="info", state="readonly")
+        self.search_engine_combo.pack(side="left", padx=(0, 8))
+        self.search_engine_combo.bind("<<ComboboxSelected>>", self._on_search_engine_changed)
+
+        self.web_query_var = tk.StringVar(value="")
+        q_entry = tb.Entry(engine_row, textvariable=self.web_query_var, bootstyle="info")
+        q_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        q_entry.bind("<Return>", lambda e: self._browser_web_search())
+        tb.Button(engine_row, text=self.t("br_btn_web_search"), bootstyle="info",
+                   command=self._browser_web_search).pack(side="left")
 
         quick = tb.Frame(self._panel_web)
         quick.pack(fill="x", pady=(0, 6))
@@ -1870,29 +2787,31 @@ class App(tb.Window):
             quick, text="CurseForge", bootstyle="secondary-outline",
             command=lambda: self._browser_navigate(
                 "https://www.curseforge.com/minecraft/search?class=mc-mods"
-                f"&page=1&pageSize=20&sortBy=relevancy&gameVersion={self.mc_version}"
-            ),
+                f"&page=1&pageSize=20&sortBy=relevancy&gameVersion={self.mc_version}"),
         ).pack(side="left", padx=(0, 6))
         tb.Button(
             quick, text="Planet MC", bootstyle="secondary-outline",
             command=lambda: self._browser_navigate(
-                "https://www.planetminecraft.com/resources/mods/?order=order_popularity"
-            ),
+                "https://www.planetminecraft.com/resources/mods/?order=order_popularity"),
+        ).pack(side="left", padx=(0, 6))
+        tb.Button(
+            quick, text="Resource Packs", bootstyle="secondary-outline",
+            command=lambda: self._browser_navigate(
+                f"https://modrinth.com/resourcepacks?g={self.mc_version}"),
         ).pack(side="left", padx=(0, 6))
 
-        self.browser_web_status = tb.Label(
-            self._panel_web, text="", bootstyle="secondary", font=("", 8),
-        )
+        self.browser_web_status = tb.Label(self._panel_web, text="",
+                                            bootstyle="secondary", font=("", 8))
         self.browser_web_status.pack(anchor="w", pady=(0, 4))
 
         self._browser_host = tb.Frame(self._panel_web, bootstyle="secondary")
         self._browser_host.pack(fill="both", expand=True)
 
         self._browser_init_engine()
-        # Mặc định hiện kho mod — luôn thấy UI, không phụ thuộc WebKit
         self._browser_show_mode("mods")
         self.after(400, self._modrinth_search)
 
+    # ------------------------------------------------------------- chế độ
     def _browser_show_mode(self, mode):
         self._browser_mode = mode
         if mode == "mods":
@@ -1915,7 +2834,6 @@ class App(tb.Window):
                 self._browser_init_engine()
 
     def _browser_init_engine(self):
-        """Thử gắn HtmlFrame vào panel web; không được thì hiện hướng dẫn rõ."""
         for w in self._browser_host.winfo_children():
             try:
                 w.destroy()
@@ -1933,141 +2851,299 @@ class App(tb.Window):
             try:
                 self._html_frame = TkHtmlFrame(self._browser_host, messages_enabled=False)
                 self._html_frame.pack(fill="both", expand=True)
-                self.browser_web_status.config(
-                    text="Engine nhúng OK · anti-tracker bật")
+                self.browser_web_status.config(text=self.t("br_engine_ok"))
                 self.after(200, lambda: self._browser_navigate(BROWSER_HOME, push=True))
                 return
             except Exception as e:
                 self._html_frame = None
-                self.log(f"ℹ Browser nhúng lỗi: {e}")
+                self.log(f"ℹ Embedded browser error: {e}")
         help_box = tb.Frame(self._browser_host, padding=14)
         help_box.pack(fill="both", expand=True)
-        tb.Label(help_box, text="Chưa có engine trang web nhúng",
+        tb.Label(help_box, text=self.t("br_engine_missing_title"),
                   font=("", 11, "bold")).pack(anchor="w")
-        tb.Label(
-            help_box,
-            text=("Tab «Kho mod» vẫn dùng được ngay (không cần WebKit).\n"
-                  "Muốn xem trang web đầy đủ trong launcher: bấm «Cài engine browser» "
-                  "rồi khởi động lại — hoặc «Cửa sổ riêng»."),
-            bootstyle="secondary", wraplength=620, justify="left",
-        ).pack(anchor="w", pady=(8, 10))
-        tb.Button(help_box, text="Mở cửa sổ web an toàn", bootstyle="info",
+        tb.Label(help_box, text=self.t("br_engine_missing_body"),
+                  bootstyle="secondary", wraplength=620, justify="left").pack(
+            anchor="w", pady=(8, 10))
+        tb.Button(help_box, text=self.t("br_open_secure"), bootstyle="info",
                    command=self._browser_open_secure_window).pack(anchor="w")
-        self.browser_web_status.config(text="Dùng Kho mod hoặc Cửa sổ riêng")
+        self.browser_web_status.config(text=self.t("br_use_store"))
 
     def _browser_set_status(self, text):
+        for attr in ("browser_status", "browser_web_status"):
+            try:
+                getattr(self, attr).config(text=text)
+            except Exception:
+                pass
+
+    # ------------------------------------------------- Modrinth: tìm kiếm
+    def _current_browse_type(self):
         try:
-            self.browser_status.config(text=text)
+            return self.browse_type_var.get() or "mod"
         except Exception:
-            pass
-        try:
-            self.browser_web_status.config(text=text)
-        except Exception:
-            pass
+            return "mod"
+
+    def _browse_folder_for(self, ptype):
+        for t, folder, _key in self.BROWSE_TYPES:
+            if t == ptype:
+                return folder
+        return "mods"
+
+    def _modrinth_facets(self, ptype):
+        """Facet tìm kiếm. Chỉ mod/modpack mới cần loader fabric; resource pack
+        và shader không gắn loader (gắn vào là ra 0 kết quả)."""
+        facets = [f'["project_type:{ptype}"]', f'["versions:{self.mc_version}"]']
+        if ptype == "mod":
+            facets.insert(1, '["categories:fabric"]')
+        return "[" + ",".join(facets) + "]"
 
     def _modrinth_search(self):
         if requests is None:
-            self._browser_set_status("Thiếu thư viện requests")
+            self._browser_set_status(self.t("br_need_requests"))
             return
+        ptype = self._current_browse_type()
         q = (self.mod_search_var.get() or "").strip()
-        if not q:
-            self._browser_set_status("Nhập từ khóa tìm mod")
-            return
-        self._browser_set_status(f"Đang tìm «{q}» trên Modrinth…")
+        self._browser_set_status(self.t("br_searching", q=q or "top"))
+        self._thumb_token += 1
+        token = self._thumb_token
 
         def job():
             try:
-                # facets: fabric + game version
-                facets = f'[["categories:fabric"],["versions:{self.mc_version}"]]'
                 params = {
                     "query": q,
                     "limit": 20,
-                    "index": "relevance",
-                    "facets": facets,
+                    "index": "relevance" if q else "downloads",
+                    "facets": self._modrinth_facets(ptype),
                 }
-                r = requests.get(
-                    "https://api.modrinth.com/v2/search",
-                    params=params, timeout=20,
-                    headers={"User-Agent": "ArchClient/2.0"},
-                )
+                r = requests.get("https://api.modrinth.com/v2/search", params=params,
+                                  timeout=20, headers={"User-Agent": self.MODRINTH_UA})
                 r.raise_for_status()
                 hits = r.json().get("hits") or []
                 self._mod_results = hits
-
-                def fill():
-                    self.mod_tree.delete(*self.mod_tree.get_children())
-                    for i, h in enumerate(hits):
-                        name = h.get("title") or h.get("slug") or "?"
-                        dl = h.get("downloads") or 0
-                        vers = ", ".join((h.get("versions") or [])[:3])
-                        self.mod_tree.insert(
-                            "", "end", iid=str(i),
-                            values=(name, f"{dl:,}", vers),
-                        )
-                    if not hits:
-                        self._browser_set_status(
-                            f"Không có mod «{q}» cho MC {self.mc_version} + Fabric")
-                    else:
-                        self._browser_set_status(
-                            f"Tìm thấy {len(hits)} mod (MC {self.mc_version}) · chọn → Tải")
-                self.after(0, fill)
+                self.after(0, lambda: self._fill_results(hits, q, ptype, token))
             except Exception as e:
-                self.after(0, lambda: self._browser_set_status(f"Lỗi tìm: {e}"))
+                self.after(0, lambda: self._browser_set_status(
+                    self.t("br_error_search", err=e)))
                 write_error_log("Modrinth search", exc=e)
 
         threading.Thread(target=job, daemon=True).start()
 
-    def _modrinth_download_selected(self):
-        sel = self.mod_tree.selection()
-        if not sel:
-            self._browser_set_status("Chọn một mod trong danh sách trước")
+    def _blank_thumb_image(self):
+        """Ảnh trống cùng kích thước -> các hàng chưa có icon vẫn thẳng hàng."""
+        if self._blank_thumb is None and ImageTk is not None and Image is not None:
+            try:
+                s = self.THUMB_SIZE
+                self._blank_thumb = ImageTk.PhotoImage(
+                    Image.new("RGBA", (s, s), (0, 0, 0, 0)))
+            except Exception:
+                self._blank_thumb = None
+        return self._blank_thumb
+
+    def _fill_results(self, hits, q, ptype, token):
+        self.mod_tree.delete(*self.mod_tree.get_children())
+        self._row_images.clear()
+        blank = self._blank_thumb_image()
+        for i, h in enumerate(hits):
+            name = h.get("title") or h.get("slug") or "?"
+            author = h.get("author") or ""
+            dl = h.get("downloads") or 0
+            desc = (h.get("description") or "").replace("\n", " ")
+            if len(desc) > 110:
+                desc = desc[:110] + "…"
+            iid = str(i)
+            kwargs = {"image": blank} if blank is not None else {}
+            self.mod_tree.insert("", "end", iid=iid,
+                                  values=(name, author, f"{dl:,}", desc), **kwargs)
+            icon_url = h.get("icon_url") or ""
+            if icon_url:
+                self._queue_thumbnail(iid, icon_url, token)
+        if not hits:
+            self._browser_set_status(self.t("br_empty", q=q or "…", ver=self.mc_version))
+        else:
+            self._browser_set_status(
+                self.t("br_found", n=len(hits), ver=self.mc_version))
+
+    # --------------------------------------------- Modrinth: ảnh minh hoạ
+    def _queue_thumbnail(self, iid, url, token):
+        """Tải ảnh icon ở luồng nền; tạo PhotoImage trên luồng UI (Tk không
+        thread-safe). Ảnh của lượt tìm cũ bị bỏ qua qua cơ chế token."""
+        if Image is None or ImageTk is None or requests is None:
             return
-        try:
-            idx = int(sel[0])
-            hit = self._mod_results[idx]
-        except Exception:
-            self._browser_set_status("Không đọc được mod đã chọn")
+        cached = self._thumb_cache.get(url)
+        if cached is not None:
+            self._apply_thumbnail(iid, cached, token)
             return
-        slug = hit.get("slug") or hit.get("project_id")
-        if not slug:
-            self._browser_set_status("Mod không có slug")
-            return
-        self._browser_set_status(f"Đang tải {slug}…")
-        self.set_status("Tải mod…", "inverse-warning")
 
         def job():
             try:
-                ok = self._download_modrinth_mod(slug)
-                if ok:
-                    self.after(0, lambda: self._browser_set_status(
-                        f"✅ Đã tải {slug} cho MC {self.mc_version}"))
-                else:
-                    msg = self.LANG.get(
-                        "no_mod_for_ver",
-                        "Không có bản cho {ver} + Fabric.",
-                    ).format(ver=self.mc_version)
-                    self.after(0, lambda: self._browser_set_status(
-                        f"⚠ {slug}: {msg}"))
-                self.after(0, lambda: self.set_status("Sẵn sàng"))
-                self.after(0, self.refresh_all)
-            except Exception as e:
-                self.after(0, lambda: self._browser_set_status(f"Lỗi tải: {e}"))
-                write_error_log(f"Tải mod browser ({slug})", exc=e)
+                r = requests.get(url, timeout=12,
+                                  headers={"User-Agent": self.MODRINTH_UA})
+                r.raise_for_status()
+                data = r.content
+                # Modrinth có icon .svg — Pillow không đọc được, bỏ qua im lặng.
+                if b"<svg" in data[:512].lower():
+                    return
+                self.after(0, lambda: self._make_thumbnail(iid, url, data, token))
+            except Exception:
+                pass
 
         threading.Thread(target=job, daemon=True).start()
 
+    def _make_thumbnail(self, iid, url, data, token):
+        if token != self._thumb_token:
+            return
+        try:
+            from io import BytesIO
+            s = self.THUMB_SIZE
+            img = Image.open(BytesIO(data)).convert("RGBA")
+            img = img.resize((s, s), getattr(Image, "LANCZOS", Image.BICUBIC))
+            try:
+                img.putalpha(_soft_round_mask((s, s), radius=8))
+            except Exception:
+                pass
+            photo = ImageTk.PhotoImage(img)
+            self._thumb_cache[url] = photo
+            self._apply_thumbnail(iid, photo, token)
+        except Exception:
+            pass
+
+    def _apply_thumbnail(self, iid, photo, token):
+        if token != self._thumb_token:
+            return
+        try:
+            self._row_images[iid] = photo   # giữ tham chiếu, nếu không ảnh biến mất
+            self.mod_tree.item(iid, image=photo)
+        except Exception:
+            pass
+
+    # ------------------------------------------- Modrinth: tải / mở trang
+    def _selected_hit(self):
+        sel = self.mod_tree.selection()
+        if not sel:
+            self._browser_set_status(self.t("br_select_first"))
+            return None
+        try:
+            return self._mod_results[int(sel[0])]
+        except Exception:
+            self._browser_set_status(self.t("br_select_first"))
+            return None
+
+    def _modrinth_open_selected_page(self):
+        hit = self._selected_hit()
+        if not hit:
+            return
+        ptype = self._current_browse_type()
+        slug = hit.get("slug") or hit.get("project_id")
+        path = {"mod": "mod", "resourcepack": "resourcepack",
+                "shader": "shader"}.get(ptype, "mod")
+        self._browser_show_mode("web")
+        self._browser_navigate(f"https://modrinth.com/{path}/{slug}", push=True)
+
+    def _modrinth_download_selected(self):
+        hit = self._selected_hit()
+        if not hit:
+            return
+        ptype = self._current_browse_type()
+        slug = hit.get("slug") or hit.get("project_id")
+        name = hit.get("title") or slug
+        folder = self._browse_folder_for(ptype)
+        self._browser_set_status(self.t("br_downloading", name=name))
+        self.set_status(self.t("status_working"), "inverse-warning")
+
+        def job():
+            try:
+                if ptype == "mod":
+                    ok = self._download_modrinth_mod(slug)
+                else:
+                    ok = self._download_modrinth_content(slug, ptype)
+                if ok:
+                    self.after(0, lambda: self._browser_set_status(
+                        self.t("br_downloaded", name=name, folder=folder)))
+                else:
+                    self.after(0, lambda: self._browser_set_status(
+                        self.t("br_download_fail", name=name, ver=self.mc_version)))
+                self.after(0, lambda: self.set_status(self.t("status_ready")))
+                self.after(0, self.refresh_all)
+            except Exception as e:
+                self.after(0, lambda: self._browser_set_status(
+                    self.t("br_error_download", err=e)))
+                write_error_log(f"Download {ptype} ({slug})", exc=e)
+
+        threading.Thread(target=job, daemon=True).start()
+
+    def _download_modrinth_content(self, slug, ptype):
+        """Tải resource pack / shader / modpack về đúng thư mục trong .minecraft.
+        Resource pack thường hỗ trợ nhiều phiên bản nên nếu lọc theo đúng
+        mc_version mà rỗng thì thử lại không lọc (lấy bản mới nhất)."""
+        if requests is None:
+            return False
+        folder = self._browse_folder_for(ptype)
+        dest_dir = self.mc_dir / folder
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        base = f"https://api.modrinth.com/v2/project/{slug}/version"
+        urls = [f'{base}?game_versions=["{self.mc_version}"]', base]
+        versions = []
+        for api in urls:
+            try:
+                r = requests.get(api, timeout=15,
+                                  headers={"User-Agent": self.MODRINTH_UA})
+                r.raise_for_status()
+                versions = r.json() or []
+            except Exception:
+                versions = []
+            if versions:
+                break
+        if not versions:
+            return False
+
+        files = versions[0].get("files") or []
+        if not files:
+            return False
+        finfo = next((x for x in files if x.get("primary")), files[0])
+        dest = dest_dir / finfo["filename"]
+        if dest.exists():
+            self.log(f"  ⏭ {finfo['filename']}: already installed, skipped.")
+            return True
+        self.log(f"  ⬇ Downloading {finfo['filename']} → {folder}/ ...")
+        urllib.request.urlretrieve(finfo["url"], dest)
+        self.log(f"  ✅ Done: {finfo['filename']}")
+        return True
+
+    # ---------------------------------------------------- điều hướng web
+    def _on_search_engine_changed(self, _event=None):
+        try:
+            self.cfg["search_engine"] = self.search_engine_var.get()
+            save_config(self.cfg)
+        except Exception:
+            pass
+
+    def _browser_web_search(self):
+        q = (self.web_query_var.get() or "").strip()
+        if not q:
+            return
+        engine = self.search_engine_var.get() or DEFAULT_SEARCH_ENGINE
+        self._browser_navigate(build_search_url(q, engine), push=True)
+
     def _browser_go_home(self):
-        url = f"https://modrinth.com/mods?g={self.mc_version}&l=fabric"
-        self._browser_navigate(url, push=True)
+        self._browser_navigate(
+            f"https://modrinth.com/mods?g={self.mc_version}&l=fabric", push=True)
 
     def _browser_go(self):
-        self._browser_navigate(self.browser_url_var.get(), push=True)
+        """Thanh địa chỉ thông minh: URL thì mở, không thì tìm bằng engine."""
+        raw = (self.browser_url_var.get() or "").strip()
+        if not raw:
+            return
+        if looks_like_url(raw):
+            self._browser_navigate(raw, push=True)
+        else:
+            engine = self.search_engine_var.get() or DEFAULT_SEARCH_ENGINE
+            self._browser_navigate(build_search_url(raw, engine), push=True)
 
     def _browser_navigate(self, url, push=True):
         url = sanitize_browse_url(url)
         if is_tracker_url(url):
-            self._browser_set_status("Đã chặn URL tracker")
-            self.log(f"🛡 Browser: chặn tracker {url}")
+            self._browser_set_status(self.t("br_blocked_tracker"))
+            self.log(f"🛡 Browser: blocked tracker {url}")
             return
         self.browser_url_var.set(url)
         if push:
@@ -2077,8 +3153,8 @@ class App(tb.Window):
             self._browser_hist_i = len(self._browser_history) - 1
 
         host = _host_of(url)
-        self._browser_set_status(f"Đang tải · {host} · anti-tracker")
-        self.set_discord_activity("Đang duyệt mod", host or "Browser")
+        self._browser_set_status(self.t("br_loading", host=host))
+        self.set_discord_activity("Browsing mods", host or "Browser")
 
         if self._html_frame is not None:
             try:
@@ -2090,13 +3166,12 @@ class App(tb.Window):
                     self._html_frame.load_html(
                         f'<meta http-equiv="refresh" content="0;url={url}">')
                 self._browser_inject_shield()
-                self._browser_set_status(f"OK · {host} · tracker blocked")
+                self._browser_set_status(self.t("br_loaded", host=host))
             except Exception as e:
-                self._browser_set_status(f"Lỗi tải trang: {e}")
-                self.log(f"❌ Browser nhúng: {e}")
+                self._browser_set_status(self.t("br_load_error", err=e))
+                self.log(f"❌ Embedded browser: {e}")
         else:
-            self._browser_set_status(
-                "Không có engine nhúng — bấm «Cửa sổ riêng» hoặc «Cài engine browser»")
+            self._browser_set_status(self.t("br_no_engine"))
 
     def _browser_inject_shield(self):
         try:
@@ -2132,12 +3207,10 @@ class App(tb.Window):
             except Exception:
                 pywebview = None
         if pywebview is None:
-            self.log("⚠ Thiếu pywebview — đang cài…")
+            self.log("⚠ pywebview missing — installing…")
             self._browser_reinstall_deps()
-            # fallback: mở trình duyệt hệ thống HTTPS
             try:
                 webbrowser.open(sanitize_browse_url(self.browser_url_var.get()))
-                self._browser_set_status("Đã mở bằng trình duyệt hệ thống (tạm)")
             except Exception:
                 pass
             return
@@ -2145,10 +3218,8 @@ class App(tb.Window):
 
         def _runner():
             try:
-                self.after(0, lambda: self._browser_set_status("Cửa sổ an toàn đang mở…"))
                 window = pywebview.create_window(
-                    "Arch Client Browser", url, width=1100, height=720, text_select=True,
-                )
+                    "Arch Client Browser", url, width=1100, height=720, text_select=True)
 
                 def _on_loaded():
                     try:
@@ -2164,9 +3235,8 @@ class App(tb.Window):
                     pywebview.start(private_mode=True)
                 except TypeError:
                     pywebview.start()
-                self.after(0, lambda: self._browser_set_status("Đã đóng cửa sổ browser"))
             except Exception as e:
-                self.log(f"❌ Lỗi pywebview: {e}")
+                self.log(f"❌ pywebview error: {e}")
                 write_error_log("Browser pywebview", exc=e)
                 try:
                     webbrowser.open(url)
@@ -2177,18 +3247,18 @@ class App(tb.Window):
 
     def _browser_reinstall_deps(self):
         def job():
-            self.log("⏳ Cài gói trình duyệt (tkinterweb, pywebview)…")
-            self.after(0, lambda: self._browser_set_status("Đang cài engine…"))
+            self.log("⏳ Installing browser packages (tkinterweb, pywebview)…")
+            self.after(0, lambda: self._browser_set_status(self.t("br_installing_engine")))
             ok = _pip_install(["tkinterweb", "pywebview"])
             if OS_INFO.get("system") == "Linux":
                 ensure_system_packages(OS_INFO)
             if ok:
-                self.log("✅ Đã cài gói browser. Bấm «Trang web» hoặc khởi động lại launcher.")
-                self.after(0, lambda: self._browser_set_status("Cài xong — thử tab Trang web"))
+                self.log("✅ Browser packages installed.")
+                self.after(0, lambda: self._browser_set_status(self.t("br_engine_installed")))
                 self.after(0, self._browser_init_engine)
             else:
-                self.log("⚠ Cài engine chưa đủ — Kho mod vẫn dùng được.")
-                self.after(0, lambda: self._browser_set_status("Cài chưa đủ — dùng Kho mod"))
+                self.log("⚠ Engine install incomplete — the content store still works.")
+                self.after(0, lambda: self._browser_set_status(self.t("br_engine_partial")))
         threading.Thread(target=job, daemon=True).start()
 
     # -------------------------------------------------------------- log tab
@@ -2198,7 +3268,7 @@ class App(tb.Window):
 
         toolbar = tb.Frame(f)
         toolbar.pack(fill="x", pady=(0, 8))
-        tb.Label(toolbar, text="🖥️  Console", font=("", 12, "bold")).pack(side="left")
+        tb.Label(toolbar, text=self.t("log_title"), font=("", 12, "bold")).pack(side="left")
         tb.Button(toolbar, text=self.LANG["btn_save_console"], bootstyle="info-outline",
                    command=self.save_console_to_file).pack(side="right", padx=(6, 0))
         tb.Button(toolbar, text=self.LANG["btn_clear_console"], bootstyle="secondary-outline",
@@ -2377,13 +3447,13 @@ class App(tb.Window):
             self.cfg["auto_install_shortcuts"] = True
             save_config(self.cfg)
             self.after(0, self._refresh_shortcut_status)
-            self.set_status("Sẵn sàng")
+            self.set_status(self.t("status_ready"))
         except Exception as e:
             self.log(f"❌ Lỗi cài shortcut: {e}")
             log_path = write_error_log("Cài shortcut desktop", exc=e)
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self.set_status("Lỗi", "inverse-danger")
+            self.set_status(self.t("status_error"), "inverse-danger")
             self.after(0, self._refresh_shortcut_status)
 
     def remove_shortcuts_thread(self):
@@ -2433,21 +3503,37 @@ class App(tb.Window):
         try:
             self.set_status("Đang cài Fabric...", "inverse-warning")
             self.mc_dir.mkdir(parents=True, exist_ok=True)
-            self.log(f"⏳ Đang cài Fabric Loader cho Minecraft {self.mc_version}...")
+
+            # Trước đây gọi mll.fabric.install_fabric() không truyền java=...,
+            # nên lib tự gọi lệnh "java" trơn qua PATH — nếu Windows chưa có
+            # Java trong PATH thì subprocess báo FileNotFoundError (WinError 2).
+            # Giờ resolve đúng java_path đã cấu hình (hoặc bản Java tự tải) rồi
+            # truyền thẳng vào, không phụ thuộc PATH của Windows nữa.
+            java_exe = resolve_java_path(self.java_var.get())
+            if not java_exe:
+                self.log("❌ Không tìm thấy Java. Vào tab Cài đặt, bấm "
+                          "'⬇ Kiểm tra / Cài Java tự động' trước khi cài Fabric.")
+                self.set_status(self.t("status_error"), "inverse-danger")
+                return
+
+            self.log(f"⏳ Đang cài Fabric Loader cho Minecraft {self.mc_version} "
+                      f"(dùng Java: {java_exe})...")
             callback = {
                 "setStatus": lambda text: self.log(f"  {text}"),
                 "setProgress": lambda value: None,
                 "setMax": lambda value: None,
             }
-            mll.fabric.install_fabric(self.mc_version, str(self.mc_dir), callback=callback)
+            mll.fabric.install_fabric(
+                self.mc_version, str(self.mc_dir), callback=callback, java=java_exe
+            )
             self.log("✅ Cài Fabric thành công!")
-            self.set_status("Sẵn sàng")
+            self.set_status(self.t("status_ready"))
         except Exception as e:
             self.log(f"❌ Lỗi khi cài Fabric: {e}")
             log_path = write_error_log("Cài Fabric", exc=e)
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self.set_status("Lỗi", "inverse-danger")
+            self.set_status(self.t("status_error"), "inverse-danger")
 
     # ------------------------------------------------------- Microsoft auth
     def login_microsoft_thread(self):
@@ -2519,20 +3605,11 @@ class App(tb.Window):
             self.log(f"🚀 Chuẩn bị chạy: {version_id}")
 
             ram = int(self.ram_var.get())
-            jvm_args = [
-                f"-Xms{ram}M", f"-Xmx{ram}M",
-                "-XX:+UseG1GC", "-XX:+ParallelRefProcEnabled",
-                "-XX:MaxGCPauseMillis=200", "-XX:+UnlockExperimentalVMOptions",
-                "-XX:+DisableExplicitGC", "-XX:+AlwaysPreTouch",
-                "-XX:G1NewSizePercent=30", "-XX:G1MaxNewSizePercent=40",
-                "-XX:G1HeapRegionSize=8M", "-XX:G1ReservePercent=20",
-                "-XX:G1HeapWastePercent=5", "-XX:G1MixedGCCountTarget=4",
-                "-XX:InitiatingHeapOccupancyPercent=15",
-                "-XX:G1MixedGCLiveThresholdPercent=90",
-                "-XX:G1RSetUpdatingPauseTimePercent=5",
-                "-XX:SurvivorRatio=32", "-XX:+PerfDisableSharedMem",
-                "-XX:MaxTenuringThreshold=1",
-            ]
+            safe_ram = clamp_ram_mb(ram)
+            if safe_ram != ram:
+                self.log(f"⚠ RAM {ram} MB vượt quá 75% RAM máy — đã hạ xuống "
+                          f"{safe_ram} MB để tránh bị OOM-killer giết game.")
+            jvm_args = linux_jvm_args(safe_ram, self.cfg, java_major=jver)
             options = {
                 "username": self.user_var.get() or "Player",
                 "uuid": self.uuid or "00000000-0000-0000-0000-000000000000",
@@ -2544,10 +3621,18 @@ class App(tb.Window):
             command = mll.command.get_minecraft_command(version_id, str(self.mc_dir), options)
             command[0] = resolved_java
 
+            launch_env = build_launch_env(self.cfg)
+            prefix = build_launch_prefix(self.cfg)
+            if prefix:
+                command = prefix + command
+            for line in describe_launch_setup(self.cfg):
+                self.log("🐧 " + line)
+
             self.log("▶ Đang khởi chạy Minecraft...")
             proc = subprocess.Popen(command, cwd=str(self.mc_dir),
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                      text=True, bufsize=1)
+                                      text=True, bufsize=1, env=launch_env,
+                                      start_new_session=IS_LINUX)
             self.set_status("Đang chơi", "inverse-success")
 
             def stream_output():
@@ -2567,20 +3652,20 @@ class App(tb.Window):
                     self.set_status("Crash", "inverse-danger")
                 else:
                     self.log("ℹ Minecraft đã đóng.")
-                    self.set_status("Sẵn sàng")
+                    self.set_status(self.t("status_ready"))
 
             threading.Thread(target=stream_output, daemon=True).start()
         except FileNotFoundError as e:
             self.log(f"❌ Không tìm thấy Java tại '{self.java_var.get() or 'java'}': {e}")
             self.log("   Hãy kiểm tra lại đường dẫn Java trong tab Cài đặt.")
             write_error_log("Khởi chạy game — thiếu Java", exc=e)
-            self.set_status("Lỗi", "inverse-danger")
+            self.set_status(self.t("status_error"), "inverse-danger")
         except Exception as e:
             self.log(f"❌ Lỗi khi khởi chạy: {e}")
             log_path = write_error_log("Khởi chạy game", exc=e)
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self.set_status("Lỗi", "inverse-danger")
+            self.set_status(self.t("status_error"), "inverse-danger")
 
     # -------------------------------------------------------- Optimization
     def apply_optimization_thread(self):
@@ -2599,22 +3684,106 @@ class App(tb.Window):
                              encoding="utf-8")
         self.log(f"✅ Đã cập nhật {opt_path} với thiết lập tối ưu FPS.")
 
+    def _modrinth_version_list(self, slug):
+        """Lấy danh sách bản của 1 mod Modrinth khớp self.mc_version + Fabric,
+        sắp xếp mới nhất trước (API trả sẵn theo thứ tự này)."""
+        api = (f"https://api.modrinth.com/v2/project/{slug}/version"
+               f'?loaders=["fabric"]&game_versions=["{self.mc_version}"]')
+        r = requests.get(api, timeout=15, headers={"User-Agent": "ArchClient/2.0"})
+        r.raise_for_status()
+        return r.json()
+
+    def _modrinth_project_slug(self, project_id):
+        """Đổi project_id (vd trong 'dependencies') thành slug (vd 'sodium')."""
+        r = requests.get(f"https://api.modrinth.com/v2/project/{project_id}",
+                          timeout=15, headers={"User-Agent": "ArchClient/2.0"})
+        r.raise_for_status()
+        return r.json().get("slug", project_id)
+
+    def _download_modrinth_version(self, slug, version_obj, mods_dir):
+        """Tải đúng 1 bản (version_obj) của mod về mods_dir, xoá bản .jar cũ
+        cùng mod trước đó để tránh 2 bản song song gây xung đột."""
+        file_info = version_obj["files"][0]
+        dest = mods_dir / file_info["filename"]
+        for old in mods_dir.glob("*.jar"):
+            if slug in old.name.lower() and old.name != file_info["filename"]:
+                old.unlink(missing_ok=True)
+        self.log(f"  ⬇ Đang tải {slug} (MC {self.mc_version})...")
+        urllib.request.urlretrieve(file_info["url"], dest)
+        self.log(f"  ✅ Đã tải: {file_info['filename']}")
+
+    def _sync_sodium_for_iris(self, iris_version_obj, mods_dir):
+        """Iris chỉ chạy đúng với 1 khoảng bản Sodium nhất định. Nếu launcher
+        tải Sodium 'mới nhất' một cách độc lập, có thể vô tình chọn bản Sodium
+        mới hơn bản Iris đang hỗ trợ → mixin conflict → crash khi vào game.
+        Hàm này đọc dependency 'sodium' mà chính bản Iris đang tải yêu cầu,
+        rồi ép cài đúng bản đó (đè lên bản Sodium 'mới nhất' đã tải lệch)."""
+        try:
+            required_dep = None
+            for dep in iris_version_obj.get("dependencies", []):
+                if dep.get("dependency_type") != "required":
+                    continue
+                pid = dep.get("project_id")
+                if not pid:
+                    continue
+                try:
+                    pslug = self._modrinth_project_slug(pid)
+                except Exception:
+                    pslug = pid
+                if pslug == "sodium":
+                    required_dep = dep
+                    break
+
+            if not required_dep:
+                self.log("  ⚠ Không đọc được yêu cầu Sodium của Iris — giữ bản Sodium hiện có.")
+                return
+
+            version_id = required_dep.get("version_id")
+            if version_id:
+                # Iris ghim thẳng version_id → dùng đúng bản này, chắc chắn khớp.
+                r = requests.get(f"https://api.modrinth.com/v2/version/{version_id}",
+                                  timeout=15, headers={"User-Agent": "ArchClient/2.0"})
+                r.raise_for_status()
+                sodium_version_obj = r.json()
+            else:
+                # Iris chỉ ghi "cần Sodium" mà không ghim version cụ thể → chọn
+                # bản Sodium công bố GẦN NHẤT nhưng KHÔNG MUỘN HƠN bản Iris này,
+                # để tránh vồ bản Sodium mới hơn mà Iris chưa kịp hỗ trợ.
+                sodium_versions = self._modrinth_version_list("sodium")
+                iris_date = iris_version_obj.get("date_published", "")
+                candidates = [v for v in sodium_versions
+                              if v.get("date_published", "") <= iris_date]
+                sodium_version_obj = candidates[0] if candidates else (
+                    sodium_versions[0] if sodium_versions else None)
+
+            if not sodium_version_obj:
+                self.log("  ⚠ Không tìm được bản Sodium khớp với Iris.")
+                return
+
+            self._download_modrinth_version("sodium", sodium_version_obj, mods_dir)
+            self.log("  🔧 Đã đồng bộ Sodium theo đúng bản Iris yêu cầu (tránh crash do lệch version).")
+        except Exception as e:
+            self.log(f"  ❌ Lỗi đồng bộ Sodium/Iris: {e}")
+            write_error_log("Đồng bộ Sodium/Iris", exc=e)
+
     def _download_modrinth_mod(self, slug):
-        """Tải 1 mod từ Modrinth khớp self.mc_version + Fabric. Trả về True/False."""
+        """Tải 1 mod từ Modrinth khớp self.mc_version + Fabric. Trả về True/False.
+        Với 'iris', luôn kiểm tra & ép đúng bản Sodium tương thích sau khi tải."""
         if requests is None:
             self.log("⚠ Thiếu 'requests', bỏ qua tải mod tự động.")
             return False
         mods_dir = self.mc_dir / "mods"
         mods_dir.mkdir(parents=True, exist_ok=True)
-        if any(slug in fp.name.lower() for fp in mods_dir.glob("*.jar")):
+        already = any(slug in fp.name.lower() for fp in mods_dir.glob("*.jar"))
+
+        # Mod khác Iris: nếu đã có thì bỏ qua như trước. Iris thì luôn kiểm tra
+        # lại Sodium dù đã có file, vì bản Sodium hiện tại có thể đang lệch.
+        if slug != "iris" and already:
             self.log(f"  ⏭ {slug}: đã có, bỏ qua.")
             return True
+
         try:
-            api = (f"https://api.modrinth.com/v2/project/{slug}/version"
-                   f'?loaders=["fabric"]&game_versions=["{self.mc_version}"]')
-            r = requests.get(api, timeout=15)
-            r.raise_for_status()
-            versions = r.json()
+            versions = self._modrinth_version_list(slug)
             if not versions:
                 msg = self.LANG.get(
                     "no_mod_for_ver",
@@ -2622,11 +3791,18 @@ class App(tb.Window):
                 ).format(ver=self.mc_version)
                 self.log(f"  ⚠ {slug}: {msg}")
                 return False
-            file_info = versions[0]["files"][0]
-            dest = mods_dir / file_info["filename"]
-            self.log(f"  ⬇ Đang tải {slug} (MC {self.mc_version})...")
-            urllib.request.urlretrieve(file_info["url"], dest)
-            self.log(f"  ✅ Đã tải: {file_info['filename']}")
+
+            chosen = versions[0]
+
+            if slug == "iris":
+                if not already:
+                    self._download_modrinth_version("iris", chosen, mods_dir)
+                else:
+                    self.log("  ⏭ iris: đã có, kiểm tra lại bản Sodium khớp...")
+                self._sync_sodium_for_iris(chosen, mods_dir)
+                return True
+
+            self._download_modrinth_version(slug, chosen, mods_dir)
             return True
         except Exception as e:
             self.log(f"  ❌ Lỗi tải {slug}: {e}")
@@ -2635,7 +3811,7 @@ class App(tb.Window):
 
     def _apply_optimization(self):
         self.after(0, self.opt_progress.start)
-        self.set_status("Đang tối ưu...", "inverse-warning")
+        self.set_status(self.t("opt_running"), "inverse-warning")
         self.log("🚀 Bắt đầu tối ưu FPS...")
         try:
             self._write_optimized_options()
@@ -2643,13 +3819,13 @@ class App(tb.Window):
                 if var.get():
                     self._download_modrinth_mod(slug)
             self.log("🎉 Hoàn tất tối ưu! Khởi động lại game để áp dụng.")
-            self.set_status("Sẵn sàng")
+            self.set_status(self.t("status_ready"))
         except Exception as e:
             self.log(f"❌ Lỗi khi tối ưu FPS: {e}")
             log_path = write_error_log("Tối ưu FPS", exc=e)
             if log_path:
                 self.log(f"📝 Chi tiết lỗi đã ghi vào: {log_path}")
-            self.set_status("Lỗi", "inverse-danger")
+            self.set_status(self.t("status_error"), "inverse-danger")
         finally:
             # Luôn dừng thanh tiến trình dù thành công hay lỗi, tránh treo UI
             self.after(0, self.opt_progress.stop)
@@ -2737,4 +3913,11 @@ def run_with_splash():
 
 
 if __name__ == "__main__":
+    if FROZEN:
+        # An toàn khi đóng gói kiểu --onefile: nếu có thư viện nào đó âm
+        # thầm dùng multiprocessing mà thiếu freeze_support(), tiến trình
+        # con sẽ tự chạy lại toàn bộ .exe từ đầu -> mở đè hàng loạt cửa sổ
+        # -> ngốn RAM. Gọi freeze_support() sớm nhất có thể để chặn việc đó.
+        import multiprocessing
+        multiprocessing.freeze_support()
     run_with_splash()
