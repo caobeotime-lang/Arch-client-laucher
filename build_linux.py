@@ -155,6 +155,10 @@ def make_appimage(onedir: Path):
     (appdir / "usr" / "share" / "icons" / "hicolor" / "256x256" / "apps").mkdir(parents=True)
 
     shutil.copytree(onedir, appdir / "usr" / "bin", dirs_exist_ok=True)
+    # AppRun đặt APPDIR = gốc AppDir, mà launcher tìm img/ ngay cạnh APPDIR
+    # -> phải đặt một bản img/ ở gốc, không chỉ trong usr/bin.
+    if IMG_DIR.exists():
+        shutil.copytree(IMG_DIR, appdir / "img", dirs_exist_ok=True)
     icon = IMG_DIR / "icon.png"
     if icon.exists():
         shutil.copy(icon, appdir / "arch-client.png")
