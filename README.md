@@ -1,15 +1,17 @@
-# Arch Laucher
+# Arch Laucher — Linux
 
 A Minecraft Fabric launcher written in Python. Originally built for my own
-CachyOS/KDE Plasma setup, it now runs on Windows as well as Arch- and
-Debian-based Linux distros. The goal was simple: click once and play —
-no manually installing Java, setting up Fabric, or worrying about the
-stock launcher not reading whatever messy mod folder structure you left
-behind.
+CachyOS/KDE Plasma setup. The goal was simple: click once and play — no
+manually installing Java, setting up Fabric, or fighting the stock launcher
+over a messy mod folder.
 
-The UI uses `ttkbootstrap` (flatly theme), with a real terminal-style
-console built right into the app for watching logs, and the launcher
-handles nearly everything during first-time setup on its own.
+This is the **Linux branch**. It has every feature of the Windows branch,
+plus a layer of Linux-only tuning: GPU and session detection, threaded
+OpenGL, on-disk shader cache, `gamemoderun`/MangoHud integration, jemalloc
+preloading, and JVM flags that actually make sense on Linux.
+
+The UI uses `ttkbootstrap` (flatly theme) and includes a real terminal-style
+console for watching logs live.
 
 ![Arch Client icon](img/icon.png)
 
@@ -17,178 +19,253 @@ handles nearly everything during first-time setup on its own.
 
 ## Why this exists
 
-Mojang's official launcher doesn't support Fabric, and third-party
-launchers (MultiMC, Prism...) are great but a bit heavy if all you need is
-a fixed, pre-optimized mod set without much manual tweaking. Arch Client
-automates that part: open it up, it detects what's missing and installs
-it, builds the `.minecraft` folder structure, and comes with a one-click
-"Optimize FPS" button that pulls a curated mod set from Modrinth.
+Mojang's official launcher doesn't support Fabric, and third-party launchers
+(MultiMC, Prism...) are great but heavier than needed if all you want is a
+fixed, pre-optimized mod set. Arch Client automates that part: open it, it
+detects what's missing and installs it, builds the `.minecraft` folder
+structure, and gives you a one-click "Optimize FPS" button that pulls a
+curated mod set from Modrinth.
+
+On Linux there's a second problem the other launchers mostly leave to you:
+the default JVM and driver settings are not what you want for gaming. Mesa's
+threaded GL is off, the shader cache is tiny, `_JAVA_OPTIONS` from your
+distro silently overrides your heap size, hybrid laptops render on the iGPU,
+and a too-large `-Xmx` gets your game killed by the OOM killer mid-session.
+This branch handles all of that.
 
 ## Features
 
-- **Automatic OS detection** — Windows 10/11, Arch Linux and Arch-based
-  distros (Manjaro, EndeavourOS, Garuda, CachyOS...), Debian/Ubuntu and
-  Debian-based distros (Mint, Pop!_OS, Zorin...).
-- **Auto-installs missing Python packages** at startup (`ttkbootstrap`,
-  `minecraft-launcher-lib`, `requests`, `Pillow`...), and automatically
-  handles the `externally-managed-environment` error common on newer
-  distros by falling back to `--break-system-packages`.
-- **Auto-installs missing system packages** for `tkinter`, via `pacman`
-  or `apt` depending on the distro.
-- **Auto-detects and installs the right Java version** for the target
-  Minecraft version (Java 21+ for 1.20.5 and up), downloading directly
-  from Adoptium if needed, or trying the system's package manager first.
-- **Auto-builds the `.minecraft` folder structure** — creates everything
-  from scratch if nothing exists, or fills in just the missing
-  subfolders if an older setup is already there.
-- **Installs/updates Fabric** for the targeted Minecraft version with a
-  single click, no extra steps.
+### Core (shared with the Windows branch)
+
+- **Automatic OS detection** — Arch and Arch-based (Manjaro, EndeavourOS,
+  Garuda, CachyOS...), Debian/Ubuntu-based (Mint, Pop!_OS, Zorin...),
+  Fedora/Nobara, openSUSE, Void, Alpine. Immutable distros (SteamOS,
+  Bazzite, Silverblue, NixOS) and Flatpak/Snap sandboxes are detected and
+  never asked for `sudo`.
+- **Auto-installs missing Python packages** at startup, with fallbacks for
+  the `externally-managed-environment` error: `--break-system-packages`,
+  then a user-local install into `~/.local`.
+- **Auto-installs missing system packages** for `tkinter` and WebKitGTK,
+  via the right package manager for your distro.
+- **Auto-detects and installs Java** for the target Minecraft version
+  (Java 21+ for 1.20.5 and up), from your package manager or straight from
+  Adoptium. You can pick which major version to install (21–26).
+- **Auto-builds the `.minecraft` folder structure**, creating from scratch
+  or filling in only what's missing.
+- **Installs/updates Fabric** for the selected Minecraft version in one click.
 - **One-click FPS optimization** — writes a pre-tuned `options.txt` and
-  automatically downloads popular performance mods (Sodium, Lithium,
-  Starlight, FerriteCore, Krypton, LazyDFU, Iris, ModernFix,
-  EntityCulling, ImmediatelyFast) from Modrinth, matched to the correct
-  Minecraft + Fabric version.
-- **Microsoft login** for playing online.
-- **Discord Rich Presence** (optional) — shows what you're playing / which
-  tab you're on right on Discord; simply skipped if `pypresence` isn't
-  installed.
-- **Built-in console** — watch game logs live inside the app, save logs
-  to a `.txt` file when you need to report a bug.
-- **Automatic error logging** — every unhandled exception (main thread,
-  background thread, or UI callback) is caught and written to a
-  timestamped `.txt` file in
-  `~/.config/arch-client-launcher/error_logs/`, with a full traceback —
-  never a silent crash.
-- **Multi-language (VI/EN)** — auto-selected based on your location via
-  IP, falling back to system locale if there's no internet connection.
-- **Auto-adds a bundled client mod** — if the launcher ships with a
-  `client/` folder containing a `.jar` file, it's automatically copied
-  into `mods/` if missing or outdated.
+  downloads Sodium, Lithium, Starlight, FerriteCore, Krypton, LazyDFU, Iris,
+  ModernFix, EntityCulling and ImmediatelyFast, each matched to the exact
+  Minecraft + Fabric version you selected. Iris pulls in a compatible Sodium
+  build automatically instead of leaving you with a shader crash.
+- **Built-in content browser** — search Modrinth for mods, resource packs and
+  shaders, with thumbnails, author and download counts. Files land in
+  `mods/`, `resourcepacks/` or `shaderpacks/` on their own.
+- **Real browser behaviour** — smart address bar (URL opens, anything else
+  searches) with a search-engine picker: DuckDuckGo, Google, Bing,
+  Startpage, Brave, YouTube, Modrinth, CurseForge. Known tracker domains and
+  tracking query parameters are stripped on the way through.
+- **Microsoft login** for online play.
+- **Discord Rich Presence** (optional, skipped if `pypresence` is missing).
+- **Built-in console** with live game logs and a save-to-`.txt` button.
+- **Automatic error logging** — every unhandled exception, on any thread, is
+  written with a full traceback to
+  `~/.config/arch-client-launcher/error_logs/`. No silent crashes.
+- **Fully bilingual UI (VI/EN)** — auto-selected from your IP, falling back
+  to system locale, with a manual override in Settings.
+
+### Linux-only
+
+All of these live in the **🚀 Optimize FPS** tab, under **🐧 Linux-only
+optimization**. The panel shows your detected GPU, session type (X11 or
+Wayland), core count, CPU governor and total RAM, and each toggle is saved
+to your config.
+
+| Toggle | What it does |
+|---|---|
+| `gamemoderun` | Runs the game under Feral GameMode — CPU governor to performance, GPU to high-power |
+| MangoHud | FPS/temperature/frametime overlay |
+| Threaded OpenGL | `mesa_glthread=true` (AMD/Intel) and `__GL_THREADED_OPTIMIZATIONS=1` (NVIDIA). Usually worth 5–20% FPS |
+| On-disk shader cache | `MESA_SHADER_CACHE_*` and `__GL_SHADER_DISK_CACHE` pointed at a 4 GB cache — much faster startup and chunk loading from the second run on |
+| jemalloc / mimalloc | `LD_PRELOAD`s whichever is installed. The JVM's default glibc allocator fragments badly under Minecraft's allocation pattern; this cuts RSS and micro-stutter |
+| Huge Pages + NUMA | `-XX:+UseTransparentHugePages`, and `-XX:+UseNUMA` on multi-socket machines |
+| Force discrete GPU | `__NV_PRIME_RENDER_OFFLOAD` + `prime-run` on NVIDIA Optimus, `DRI_PRIME=1` on AMD |
+| Disable driver VSync | `vblank_mode=0` / `__GL_SYNC_TO_VBLANK=0` — lower input lag |
+| Tiling WM fix | `_JAVA_AWT_WM_NONREPARENTING=1`, which fixes blank/grey windows on i3, sway, bspwm and awesome |
+| System GLFW | `-Dorg.lwjgl.glfw.libname=…` so the game uses your distro's GLFW instead of LWJGL's bundled copy — better Wayland behaviour |
+| Higher CPU priority | Wraps the launch in `nice -n -5` |
+| ZGC instead of G1 | For 8 GB+ heaps, where ZGC's sub-millisecond pauses beat G1 |
+
+Applied regardless of the toggles:
+
+- **Heap is clamped to 75% of physical RAM.** Allocating more than you have
+  is the single most common reason a Linux Minecraft session dies to the OOM
+  killer with no crash log. The launcher also shows a recommended value.
+- **`_JAVA_OPTIONS` and `JAVA_TOOL_OPTIONS` are cleared** before launch.
+  Several distros and IDEs export these, and they silently override the
+  `-Xmx` the launcher passes.
+- **`start_new_session=True`** — closing the launcher no longer kills the
+  running game.
+- **WebKitGTK is only installed when it's genuinely missing.** Earlier builds
+  shelled out to `pacman`/`apt` on every single startup, so every launch
+  prompted for a sudo password.
+
+There's also an **⬇ Install gamemode / MangoHud** button that calls the
+correct package manager for your distro.
 
 ## Folder structure
 
 ```
-Arch client laucher/
-├── arch_client.py      # the entire launcher, run this file
-├── client/              # (optional) bundled client mod, auto-copied into mods/
+Arch-client-laucher/
+├── arch_laucher.py     # the entire launcher, run this file
+├── build_linux.py      # packaging script (tar.gz / AppImage)
+├── client/             # (optional) bundled client mod, auto-copied into mods/
 │   └── arch-client-1.21.11.jar
 └── img/
-    ├── icon.png          # window/taskbar icon
-    └── banner.png        # banner shown on the Overview tab and splash screen
+    ├── icon.png        # window/taskbar icon
+    └── banner.png      # banner on the Overview tab and splash screen
 ```
 
-If `img/icon.png` or `img/banner.png` are missing, the launcher still
-runs fine — it just shows text instead of the image. The `client/` folder
-is also optional; if it's not there, the launcher simply skips the mod-copy
-step without any error.
+Missing images are not fatal — the launcher falls back to text. The
+`client/` folder is optional too; without it the mod-copy step is skipped.
 
 ## Requirements
 
-- Python 3.9 or newer (uses `sys.getwindowsversion` and modern type hints,
-  so a fairly recent version is needed).
-- An internet connection on first run (to install libraries, download
-  Fabric, download Java, and detect language via IP). It works offline
-  afterward, aside from features that need internet (downloading mods,
-  logging in).
-- On Linux, working `sudo` access is needed if the launcher has to install
-  system packages (`tk`, `jdk-openjdk`...) — it automatically prepends
-  `sudo` to commands when required.
+- Python 3.9 or newer.
+- `tkinter` (`tk` on Arch, `python3-tk` on Debian/Ubuntu, `python3-tkinter`
+  on Fedora). The launcher installs it for you if it can use `sudo`.
+- An internet connection on first run, for libraries, Fabric, Java and
+  IP-based language detection. Everything except downloads and login works
+  offline afterwards.
+- Optional but recommended: `gamemode`, `mangohud`, `jemalloc`.
 
 ## Installation & running
 
-No setup required beforehand — clone or download the repo and run it
-directly:
-
 ```bash
-python3 arch_client.py
+git clone -b Linux https://github.com/caobeotime-lang/Arch-client-laucher.git
+cd Arch-client-laucher
+python3 arch_laucher.py
 ```
 
-The first run will take a bit longer since the launcher has to install
-missing Python packages, detect Java, and build the `.minecraft` folder
-structure. Later runs will be faster since everything's already in place.
+The first run is slower — it installs Python packages, detects Java and
+builds the `.minecraft` tree. Later runs skip all of that.
 
-If you'd rather install everything manually first:
+To install the dependencies yourself first:
 
 ```bash
 pip install minecraft-launcher-lib requests ttkbootstrap pillow --break-system-packages
 ```
 
-## Usage guide
+## Building a standalone package
 
-The main window is split into 4 tabs:
+Users receiving the build need no Python, no pip and no Java.
+
+```bash
+python3 build_linux.py             # onedir + ArchClient-2.1.0-linux-x86_64.tar.gz
+python3 build_linux.py --appimage  # also produces an .AppImage
+python3 build_linux.py --onefile   # single executable
+```
+
+The `.tar.gz` ships with an `install.sh` that copies everything into
+`~/.local/share/arch-client`, symlinks `arch-client` into `~/.local/bin`, and
+registers a `.desktop` entry plus icon — no root needed.
+
+**Build on the oldest glibc you intend to support.** A binary built on
+current Arch will not start on Ubuntu 22.04, but the reverse works fine.
+That's why `.github/workflows/linuxbuild.yml` pins `ubuntu-22.04` rather
+than `ubuntu-latest`.
+
+The launcher detects when it's running frozen and reads `$APPDIR` so the
+AppImage finds its own `img/` directory.
+
+## Usage guide
 
 | Tab | What it's for |
 |---|---|
-| 📊 Overview | Choose the `.minecraft` folder, view the list of mod/resourcepack/shaderpack/schematic files currently installed. |
-| ⚙️ Settings | Auto-check/install Java, log in with Microsoft, adjust RAM allocated to the game. |
-| 🚀 Optimize FPS | One click to write optimized FPS settings + download the selected performance mod set. |
-| 🖥️ Console | Watch live logs while the game runs, clear the console, save logs to a file. |
+| 📊 Overview | Pick the `.minecraft` folder, browse installed mods / resource packs / shaderpacks / schematics |
+| ⚙️ Settings | Check and install Java, Microsoft login, RAM slider, Minecraft version, language |
+| 🚀 Optimize FPS | Performance mod set, tuned `options.txt`, and the Linux-only panel above |
+| 🌐 Browser / Mods | Modrinth search with thumbnails, plus a real address bar and search-engine picker |
+| 🖥️ Console | Live game logs, clear, save to file |
 
-The footer always has 2 fixed buttons: **⬇ Install / Update Fabric**
-(click before playing for the first time or after changing versions) and
-**▶ PLAY NOW**. The standard flow for a first run: install Fabric → check
-Java in the Settings tab → log in with Microsoft (if playing online) →
-click Play Now.
+The footer always shows **⬇ Install / Update Fabric** and **▶ PLAY NOW**.
+First-run order: install Fabric → check Java in Settings → Microsoft login
+if you're playing online → Play Now.
 
 ## Troubleshooting
 
-**Launcher won't open, reports missing `tkinter`**
-Your distro ships `tkinter` separately from base Python. Install it with
-`sudo pacman -S tk` (Arch) or `sudo apt install python3-tk`
-(Debian/Ubuntu), then run again — the launcher also tries to do this
-itself if it has sudo access, but if your environment doesn't allow
-automatic sudo, you'll need to do it manually.
+**`ModuleNotFoundError: No module named 'tkinter'`**
+Your distro ships Tk separately. `sudo pacman -S tk`,
+`sudo apt install python3-tk`, or `sudo dnf install python3-tkinter`.
 
-**Game crashes right on launch, Java log shows an error related to
-`MessageFormat` / `Mod resolution failed`**
-This means two mods in `mods/` are conflicting (one mod needs another
-you haven't installed, or two mods declare themselves incompatible) — a
-bug in Fabric Loader itself causes the real error message to get masked
-by an unrelated exception that looks like a date-format error. Look for
-the `Mod resolution failed` and `Immediate reason:` lines right above the
-crash in `latest.log` (or in the log file the launcher automatically
-writes to `error_logs/`) to find out exactly which mods are conflicting,
-then remove or swap one out.
+**The game window is blank/grey on i3, sway or bspwm**
+Enable the tiling WM fix in the Linux panel. It sets
+`_JAVA_AWT_WM_NONREPARENTING=1`, which those window managers need.
 
-**Automatic Python package installation fails**
-Usually because there's no internet on first run, or pip is blocked by a
-firewall/proxy. Install manually using the command the launcher prints
-in the console (it already includes the `--break-system-packages` flag),
-or check your internet connection first.
+**The game dies with no crash log, and `dmesg` mentions `oom-kill`**
+You allocated more RAM than the system can give. The launcher now clamps to
+75% of physical RAM automatically, but check the value on the RAM slider
+against the recommendation shown in the Linux panel.
 
-**Discord Rich Presence doesn't show up**
-Missing `pypresence` — not required, the launcher still works fine, you
-just lose the Discord status feature. Install it with
-`pip install pypresence --break-system-packages` if you want to enable it.
+**FPS is far lower than expected on a laptop**
+You're probably rendering on the integrated GPU. Turn on "Force the discrete
+GPU". On NVIDIA, install `nvidia-prime` so `prime-run` is available. Confirm
+with `glxinfo | grep "OpenGL renderer"` under the same wrapper.
+
+**Stuttering that gamemode doesn't fix**
+Check the governor shown in the Linux panel. If it reads `powersave` and
+GameMode isn't installed, either install `gamemode` or set the governor
+yourself with `cpupower frequency-set -g performance`.
+
+**Heavy stuttering on Wayland, or the window won't resize properly**
+Enable "Use the system GLFW". LWJGL's bundled GLFW is X11-only, so without it
+you're going through XWayland.
+
+**The embedded browser tab is empty**
+`tkinterweb`/`pywebview` need WebKitGTK. Install `webkit2gtk-4.1` +
+`python-gobject` (Arch) or `gir1.2-webkit2-4.1` + `python3-gi`
+(Debian/Ubuntu). The launcher attempts this automatically when it detects
+the module is missing.
+
+**Automatic pip installs fail**
+Usually no internet on first run, or a proxy. Run the command the console
+prints — it already includes the right flags for your distro.
+
+**Game crashes on launch with `Mod resolution failed` / a `MessageFormat`
+error**
+Two mods in `mods/` conflict. A Fabric Loader bug masks the real message
+behind an unrelated date-format exception. Look for the
+`Mod resolution failed` and `Immediate reason:` lines just above the crash in
+`latest.log` or in the launcher's `error_logs/` file.
+
+**Discord Rich Presence doesn't appear**
+`pypresence` isn't installed. Purely optional:
+`pip install pypresence --break-system-packages`.
 
 ## Contributing
 
-Personal repo, no formal contribution process yet. If you find a bug or
-have an idea for improvement, feel free to open an issue describing:
-your OS, Python version, and the log/traceback if it crashed — much
-easier to debug than a description alone.
+Personal repo, no formal process yet. Bug reports are welcome — please
+include your distro, desktop environment and session type (X11/Wayland),
+GPU and driver, Python version, and the traceback from `error_logs/`.
 
 ## License
 
-This software is **free for personal, non-commercial use**. You're
-allowed to download, modify, and redistribute it for free. You are
-**not** allowed to sell it, rent it, repackage it for profit, or use it
-for any commercial purpose in any form without prior written consent
-from the author. See the [`LICENSE`](LICENSE) file for details.
+Free for **personal, non-commercial use**. You may download, modify and
+redistribute it free of charge. You may **not** sell it, rent it, repackage
+it for profit, or use it commercially in any form without prior written
+consent. See [`LICENSE`](LICENSE).
 
-Note: this license only applies to the launcher's code (`arch_client.py`).
-Third-party mods the launcher downloads (Sodium, Lithium, Iris, Fabric
-API...) retain their original authors' licenses — the launcher does not
-own and grants no additional rights over those files.
+This covers the launcher's own code only. Mods it downloads (Sodium,
+Lithium, Iris, Fabric API...) keep their original licenses.
 
 ## Credits
 
-Thanks to the open-source projects Arch Client relies on:
-[Fabric](https://fabricmc.net/),
+Built on [Fabric](https://fabricmc.net/),
 [minecraft-launcher-lib](https://github.com/JakobDev/minecraft-launcher-lib),
-[ttkbootstrap](https://ttkbootstrap.readthedocs.io/), and all the authors
-of the FPS optimization mods listed above on
-[Modrinth](https://modrinth.com/).
+[ttkbootstrap](https://ttkbootstrap.readthedocs.io/),
+[Feral GameMode](https://github.com/FeralInteractive/gamemode),
+[MangoHud](https://github.com/flightlessmango/MangoHud), and the authors of
+every optimization mod listed above on [Modrinth](https://modrinth.com/).
 
 ---
 
