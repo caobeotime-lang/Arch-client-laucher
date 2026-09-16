@@ -78,7 +78,7 @@ it, builds the `.minecraft` folder structure, and comes with a one-click
 
 ```
 Arch client laucher/
-├── arch_client.py      # the entire launcher, run this file
+├── arch_laucher.py      # the entire launcher, run this file
 ├── client/              # (optional) bundled client mod, auto-copied into mods/
 │   └── arch-client-1.21.11.jar
 └── img/
@@ -109,7 +109,7 @@ No setup required beforehand — clone or download the repo and run it
 directly:
 
 ```bash
-python3 arch_client.py
+python3 arch_laucher.py
 ```
 
 The first run will take a bit longer since the launcher has to install
@@ -238,7 +238,7 @@ allowed to download, modify, and redistribute it for free. You are
 for any commercial purpose in any form without prior written consent
 from the author. See the [`LICENSE`](LICENSE) file for details.
 
-Note: this license only applies to the launcher's code (`arch_client.py`).
+Note: this license only applies to the launcher's code (`arch_laucher.py`).
 Third-party mods the launcher downloads (Sodium, Lithium, Iris, Fabric
 API...) retain their original authors' licenses — the launcher does not
 own and grants no additional rights over those files.
