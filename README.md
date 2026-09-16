@@ -119,15 +119,12 @@ correct package manager for your distro.
 Arch-client-laucher/
 ├── arch_laucher.py     # the entire launcher, run this file
 ├── build_linux.py      # packaging script (tar.gz / AppImage)
-├── client/             # (optional) bundled client mod, auto-copied into mods/
-│   └── arch-client-1.21.11.jar
 └── img/
     ├── icon.png        # window/taskbar icon
     └── banner.png      # banner on the Overview tab and splash screen
 ```
 
-Missing images are not fatal — the launcher falls back to text. The
-`client/` folder is optional too; without it the mod-copy step is skipped.
+Missing images are not fatal — the launcher falls back to text.
 
 ## Requirements
 
