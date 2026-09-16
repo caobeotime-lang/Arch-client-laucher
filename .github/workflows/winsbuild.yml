@@ -1,16 +1,13 @@
 name: Build EXE
 
-# File .exe Windows phải build trên máy Windows thật (PyInstaller không
-# cross-compile từ Linux/Mac ra .exe được) -> workflow này tự chạy trên
-# runner "windows-latest" của GitHub, không cần bạn có máy Windows.
+# .exe Windows phải build trên máy Windows thật (PyInstaller không
+# cross-compile)  workflow chạy trên runner "windows-latest".
 #
-# ArchClient.exe là file DUY NHẤT cần thiết — icon + banner đã được nhúng
-# sẵn bên trong lúc build (--add-data), không cần kèm theo img/ nữa.
-#
-# Lấy file .exe sau khi chạy xong: tab Actions -> chọn lần chạy mới nhất
-# -> mục Artifacts -> tải "ArchClient-windows" (chỉ chứa đúng 1 file
-# ArchClient.exe). Push kèm tag "v*" sẽ tự tạo Release đính kèm sẵn
-# ArchClient.exe để tải trực tiếp.
+# Build mặc định là --onedir rồi nén thành ArchClient-windows.zip:
+# bản onedir không tự giải nén ra %TEMP% lúc chạy nên gần như không bị
+# Windows Defender gắn cờ Trojan:Win32/Wacatac.B!ml như bản --onefile cũ.
+# Job "build-onefile" vẫn tạo thêm bản 1 file cho ai cần, đánh dấu rõ là
+# có thể bị antivirus báo nhầm.
 
 on:
   push:
@@ -20,6 +17,7 @@ on:
 
 jobs:
   build:
+    name: onedir (khuyên dùng - ít bị antivirus flag)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +26,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Build ArchClient.exe
+      - name: Build ArchClient (onedir + zip)
         env:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
@@ -37,9 +35,36 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ArchClient-windows
-          path: dist/ArchClient.exe
+          path: dist/ArchClient-windows.zip
 
       - name: Tạo GitHub Release (chỉ khi push tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/ArchClient-windows.zip
+
+  build-onefile:
+    name: onefile (1 file .exe - co the bi AV bao nham)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Build ArchClient.exe (onefile)
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: python build_windows.py --onefile
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ArchClient-windows-onefile
+          path: dist/ArchClient.exe
+
+      - name: Dinh kem vao Release (chi khi push tag v*)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
