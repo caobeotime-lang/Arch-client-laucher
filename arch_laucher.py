@@ -301,11 +301,12 @@ def ensure_system_packages(osinfo):
 
 def _pip_install(packages):
     if FROZEN:
-        # Đang chạy dưới dạng .exe đã đóng gói — sys.executable là chính
-        # file .exe, KHÔNG phải python.exe, nên "-m pip" sẽ không chạy được
+        # Đang chạy từ bản đóng gói (AppImage / PyInstaller onefile) —
+        # sys.executable là chính file nhị phân đó, KHÔNG phải python,
+        # nên "-m pip" sẽ không chạy được
         # (đây chính là lỗi "không tải được thư viện" trên bản Windows cũ).
         # Không còn cần thiết vì mọi gói bắt buộc đã được nhúng sẵn lúc build.
-        _bprint("  ↳ Bản .exe đóng gói sẵn — bỏ qua bước pip install (đã nhúng sẵn thư viện).")
+        _bprint("  ↳ Bản đóng gói sẵn — bỏ qua bước pip install (đã nhúng sẵn thư viện).")
         return False
     base = [sys.executable, "-m", "pip", "install"] + packages
     _bprint("  $ " + " ".join(base))
@@ -346,13 +347,13 @@ def ensure_python_packages():
             missing.append(pip_name)
     if missing:
         if FROZEN:
-            # Không nên xảy ra: bản .exe build đúng đã nhúng sẵn mọi gói bắt
+            # Không nên xảy ra: bản đóng gói đúng đã nhúng sẵn mọi gói bắt
             # buộc. Nếu vẫn thiếu, đây là lỗi khi build chứ người dùng không
             # tự sửa bằng pip được (vì không có Python/pip trên máy họ).
-            _bprint(f"❌ Bản .exe này bị thiếu thư viện: {', '.join(missing)}.")
-            _bprint("   Đây là lỗi khi build .exe (chưa nhúng đủ thư viện) — "
-                     "hãy build lại bằng build_windows.py, không phải lỗi ở máy người dùng.")
-            write_error_log("Bootstrap — .exe thiếu thư viện đã nhúng",
+            _bprint(f"❌ Bản đóng gói này bị thiếu thư viện: {', '.join(missing)}.")
+            _bprint("   Đây là lỗi khi build (chưa nhúng đủ thư viện) — "
+                     "hãy build lại bằng build_linux.py, không phải lỗi ở máy người dùng.")
+            write_error_log("Bootstrap — bản đóng gói thiếu thư viện đã nhúng",
                              extra_text=f"Các gói còn thiếu: {', '.join(missing)}")
             sys.exit(1)
         _bprint(f"⏳ Thiếu thư viện Python: {', '.join(missing)} — đang tự động cài đặt qua pip...")
@@ -607,13 +608,14 @@ ANTI_TRACKER_JS = r"""
 })();
 """
 
-APP_DIR = EXE_DIR  # thư mục chứa .exe (hoặc chứa .py khi chạy bằng source)
+APP_DIR = EXE_DIR  # thư mục chứa file chạy (hoặc chứa .py khi chạy từ source)
 ICON_PATH = APP_DIR / "img" / "icon.png"
 BANNER_PATH = APP_DIR / "img" / "banner.png"
 
 if FROZEN and (not ICON_PATH.exists() or not BANNER_PATH.exists()):
-    # img/ không được đặt cạnh .exe — dùng bản dự phòng đã nhúng sẵn bên
-    # trong .exe lúc build (PyInstaller giải nén vào sys._MEIPASS khi chạy).
+    # img/ không nằm cạnh file chạy (ví dụ trong AppImage, img/ nằm ở
+    # usr/bin/) — dùng bản dự phòng đã nhúng lúc build: PyInstaller trỏ
+    # sys._MEIPASS vào thư mục chứa dữ liệu nhúng.
     _bundled_img_dir = Path(getattr(sys, "_MEIPASS", str(APP_DIR))) / "img"
     if not ICON_PATH.exists() and (_bundled_img_dir / "icon.png").exists():
         ICON_PATH = _bundled_img_dir / "icon.png"
@@ -1683,7 +1685,7 @@ def windows_start_menu_dir() -> Path:
 
 def windows_python_target() -> Path:
     if FROZEN:
-        # Bản .exe đóng gói: shortcut chạy thẳng file .exe, không cần python.
+        # Bản đóng gói: shortcut chạy thẳng file nhị phân, không cần python.
         return Path(sys.executable)
     exe = Path(sys.executable)
     if exe.name.lower() in ("python.exe", "python3.exe"):
