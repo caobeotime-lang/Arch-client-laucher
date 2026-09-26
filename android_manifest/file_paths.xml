@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Copied to res/xml/file_paths.xml via buildozer.spec's android.res_xml.
+    python-for-android points $HOME at the app's internal "files" storage
+    (Context.getFilesDir()), which is where core/addon_manager.py's
+    CACHE_DIR lives (~/.archclient_bedrock/addons), so <files-path>
+    covers it. Scoped to just this app's own files dir, nothing broader.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <files-path name="app_files" path="." />
+</paths>
