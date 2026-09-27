@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [ Android ]
+    branches: [ Bedrock ]
   workflow_dispatch:
 
 jobs:
@@ -39,10 +39,10 @@ jobs:
           yes | buildozer android debug
 
       - name: Rename APK
-        run: mv bin/*.apk bin/arch_laucher.apk
+        run: mv bin/*.apk bin/archclient-bedrock.apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: arch_laucher
-          path: bin/arch_laucher.apk
+          name: archclient-bedrock-apk
+          path: bin/archclient-bedrock.apk
