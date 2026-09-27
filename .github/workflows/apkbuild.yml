@@ -2,7 +2,7 @@ name: Build APK
 
 on:
   push:
-    branches: [ Bedrock ]
+    branches: [ Android, Bedrock ]
   workflow_dispatch:
 
 jobs:
