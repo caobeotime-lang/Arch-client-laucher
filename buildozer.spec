@@ -14,7 +14,7 @@ version = 1.0
 # only the build machine (or the GitHub Actions workflow) needs them.
 # NOTE: no `requests` here -- see core/http_client.py for why (its
 # dependency charset-normalizer currently breaks the p4a/Python 3.14 build).
-requirements = python3,kivy,pyjnius
+requirements = python3,kivy,pyjnius,charset-normalizer==2.1.1
 
 orientation = portrait
 fullscreen = 0
