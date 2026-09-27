@@ -1,0 +1,29 @@
+<!--
+    Wired in via buildozer.spec's android.extra_manifest_application_arguments,
+    which pastes this verbatim inside <application> in the generated
+    AndroidManifest.xml. This is what lets core/addon_manager.py hand a
+    downloaded .mcpack file to Minecraft's own import dialog through a
+    content:// URI (required since Android 7: a raw file:// URI in an
+    intent to another app is blocked and crashes with
+    FileUriExposedException).
+
+    IMPORTANT: android:authorities below must equal
+    "<package.domain>.<package.name>.fileprovider" from buildozer.spec.
+    This project's buildozer.spec has:
+        package.domain = org.caobeotime
+        package.name   = archclientbedrock
+    so the authority is "org.caobeotime.archclientbedrock.fileprovider".
+    If you ever rename package.domain or package.name, update this line
+    (core/addon_manager.py builds the same string automatically at
+    runtime from activity.getPackageName(), so only this XML file needs
+    the literal string kept in sync).
+-->
+<provider
+    android:name="androidx.core.content.FileProvider"
+    android:authorities="org.caobeotime.archclientbedrock.fileprovider"
+    android:exported="false"
+    android:grantUriPermissions="true">
+    <meta-data
+        android:name="android.support.FILE_PROVIDER_PATHS"
+        android:resource="@xml/file_paths" />
+</provider>
